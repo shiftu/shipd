@@ -105,11 +105,20 @@ Notes:
 - Encrypted Feishu payloads, Slack, WeChat-Work, Telegram are deferred —
   the Adapter interface is small enough that a new transport is ~150 LOC
 
-### v0.4 — Install pages
-- `/install/{app}` HTML page with QR code and platform-specific install link
-  (`itms-services://...` for iOS plist, direct APK for Android)
-- Plist generator for iOS enterprise / ad-hoc distribution
-- Optional download tokens: short-lived URL-signed downloads for sharing
+### Done (v0.4 — Install pages)
+- `/install/{app}` and `/install/{app}/{version}` render an HTML page
+  with a platform-appropriate install button and an inline QR code
+- `/install/{app}/{version}/manifest.plist` returns a valid iOS install
+  manifest; releases without `bundle_id` get a 422 with an actionable error
+- `/install/{app}/{version}/download` streams the artifact bytes without a
+  token, so iOS itms-services and direct browser installs work
+- All `/install/...` routes are intentionally public; gate with a reverse
+  proxy if you need privacy
+- Schema changes: `bundle_id`, `display_name`, and `platform` columns on
+  `releases`, with idempotent `ALTER TABLE` migrations so existing DBs
+  upgrade automatically
+- Optional download tokens (short-lived URL-signed downloads) deferred
+  until there is a real privacy use case
 
 ### v0.5 — More gateway adapters
 - WeChat Work, Slack, Telegram

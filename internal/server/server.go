@@ -16,6 +16,7 @@ type Config struct {
 	Addr           string
 	PublicReads    bool   // if true, list/info/download work without a token
 	BootstrapToken string // optional plaintext token; created on startup if no tokens exist
+	PublicBaseURL  string // override the auto-detected public URL used in install links and QR codes
 }
 
 // Server is a thin wrapper around http.Server holding shared state.
@@ -83,6 +84,15 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases", s.requireWrite(s.handlePublish))
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/yank", s.requireWrite(s.handleYank))
+
+	// Install pages and the assets they depend on are intentionally PUBLIC: the
+	// device opening the page (a phone scanning a QR code, an iOS device
+	// fetching the plist) does not have an API token. If you need privacy,
+	// front shipd with a reverse proxy that enforces it.
+	s.mux.HandleFunc("GET /install/{name}", s.handleInstallPage)
+	s.mux.HandleFunc("GET /install/{name}/{version}", s.handleInstallPage)
+	s.mux.HandleFunc("GET /install/{name}/{version}/manifest.plist", s.handleManifestPlist)
+	s.mux.HandleFunc("GET /install/{name}/{version}/download", s.handleInstallDownload)
 }
 
 // --- handlers ---
@@ -169,22 +179,26 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 // publishMeta carries metadata fields sent alongside the upload via query params or headers.
 type publishMeta struct {
-	Version  string
-	Channel  string
-	Platform string
-	Notes    string
-	Filename string
+	Version     string
+	Channel     string
+	Platform    string
+	Notes       string
+	Filename    string
+	BundleID    string
+	DisplayName string
 }
 
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	q := r.URL.Query()
 	meta := publishMeta{
-		Version:  q.Get("version"),
-		Channel:  q.Get("channel"),
-		Platform: q.Get("platform"),
-		Notes:    q.Get("notes"),
-		Filename: q.Get("filename"),
+		Version:     q.Get("version"),
+		Channel:     q.Get("channel"),
+		Platform:    q.Get("platform"),
+		Notes:       q.Get("notes"),
+		Filename:    q.Get("filename"),
+		BundleID:    q.Get("bundle_id"),
+		DisplayName: q.Get("display_name"),
 	}
 	if meta.Version == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("version is required"))
@@ -205,11 +219,14 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rel, err := s.store.PutRelease(r.Context(), storage.Release{
-		AppName:  name,
-		Version:  meta.Version,
-		Channel:  meta.Channel,
-		Filename: meta.Filename,
-		Notes:    meta.Notes,
+		AppName:     name,
+		Version:     meta.Version,
+		Channel:     meta.Channel,
+		Platform:    meta.Platform,
+		Filename:    meta.Filename,
+		Notes:       meta.Notes,
+		BundleID:    meta.BundleID,
+		DisplayName: meta.DisplayName,
 	}, r.Body)
 	if err != nil {
 		if errors.Is(err, storage.ErrAlreadyExists) {

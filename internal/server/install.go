@@ -1,0 +1,229 @@
+package server
+
+import (
+	"embed"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"html/template"
+	"io"
+	"net/http"
+	"net/url"
+	stdtmpl "text/template"
+	"time"
+
+	"github.com/shiftu/shipd/internal/storage"
+	qrcode "github.com/skip2/go-qrcode"
+)
+
+//go:embed templates/install.html templates/manifest.plist
+var templatesFS embed.FS
+
+var (
+	installTmpl  = template.Must(template.ParseFS(templatesFS, "templates/install.html"))
+	manifestTmpl = stdtmpl.Must(stdtmpl.ParseFS(templatesFS, "templates/manifest.plist"))
+)
+
+// installPageData is everything the install.html template needs.
+type installPageData struct {
+	Title        string
+	Version      string
+	Channel      string
+	Platform     string
+	SizeHuman    string
+	SHA256Short  string
+	PublishedAt  string
+	Notes        string
+	InstallURL   string // itms-services:// for iOS, direct download for everything else
+	InstallLabel string
+	CanInstall   bool   // false when the artifact is missing required metadata (e.g. iOS without bundle_id)
+	QRCode       string // base64-encoded PNG, empty if generation fails (page still renders)
+	Yanked       bool
+	YankedReason string
+}
+
+// plistData is everything the manifest.plist template needs.
+type plistData struct {
+	DownloadURL   string
+	BundleID      string
+	BundleVersion string
+	Title         string
+}
+
+// --- handlers ---
+
+// handleInstallPage renders an HTML page with a platform-appropriate install
+// button and a QR code that points back at the same page. It is intentionally
+// PUBLIC: a phone scanning the QR code has no API token.
+func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
+	app := r.PathValue("name")
+	version := r.PathValue("version") // empty when caller hits /install/{name}
+
+	rel, err := s.lookupForInstall(r, app, version)
+	if err != nil {
+		writeStorageError(w, err)
+		return
+	}
+
+	publicBase := s.publicBase(r)
+	pageURL := publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version)
+
+	data := installPageData{
+		Title:        installTitle(rel),
+		Version:      rel.Version,
+		Channel:      rel.Channel,
+		Platform:     rel.Platform,
+		SizeHuman:    humanSize(rel.Size),
+		SHA256Short:  shortHash(rel.SHA256),
+		PublishedAt:  time.Unix(rel.CreatedAt, 0).UTC().Format("2006-01-02 15:04 UTC"),
+		Notes:        rel.Notes,
+		Yanked:       rel.Yanked,
+		YankedReason: rel.YankedReason,
+	}
+	data.InstallURL, data.InstallLabel, data.CanInstall = installLink(rel, publicBase)
+
+	if png, err := qrcode.Encode(pageURL, qrcode.Medium, 320); err == nil {
+		data.QRCode = base64.StdEncoding.EncodeToString(png)
+	} else {
+		s.log.Printf("qrcode encode failed: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := installTmpl.Execute(w, data); err != nil {
+		s.log.Printf("install template: %v", err)
+	}
+}
+
+// handleManifestPlist returns the iOS install manifest. Public so the device
+// can fetch it after the user taps the itms-services link.
+func (s *Server) handleManifestPlist(w http.ResponseWriter, r *http.Request) {
+	app := r.PathValue("name")
+	version := r.PathValue("version")
+	rel, err := s.store.GetRelease(r.Context(), app, version, "")
+	if err != nil {
+		writeStorageError(w, err)
+		return
+	}
+	if rel.BundleID == "" {
+		writeError(w, http.StatusUnprocessableEntity,
+			fmt.Errorf("release has no bundle_id; republish with --bundle-id"))
+		return
+	}
+	data := plistData{
+		DownloadURL:   s.publicBase(r) + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/download",
+		BundleID:      rel.BundleID,
+		BundleVersion: rel.Version,
+		Title:         installTitle(rel),
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	if err := manifestTmpl.Execute(w, data); err != nil {
+		s.log.Printf("plist template: %v", err)
+	}
+}
+
+// handleInstallDownload streams the artifact bytes. Same as handleDownload but
+// reachable without a token, since iOS itms-services and direct browser
+// installs come from devices that don't have the API token.
+func (s *Server) handleInstallDownload(w http.ResponseWriter, r *http.Request) {
+	app := r.PathValue("name")
+	version := r.PathValue("version")
+	rel, err := s.store.GetRelease(r.Context(), app, version, "")
+	if err != nil {
+		writeStorageError(w, err)
+		return
+	}
+	body, err := s.store.OpenBlob(rel)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer body.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", rel.Size))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, rel.Filename))
+	w.Header().Set("X-Content-SHA256", rel.SHA256)
+	if _, err := io.Copy(w, body); err != nil && !errors.Is(err, io.EOF) {
+		s.log.Printf("install download stream: %v", err)
+	}
+}
+
+// --- helpers ---
+
+// lookupForInstall picks the right release. version "" means latest non-yanked
+// for the default channel.
+func (s *Server) lookupForInstall(r *http.Request, app, version string) (*storage.Release, error) {
+	if version == "" {
+		return s.store.LatestRelease(r.Context(), app, "")
+	}
+	return s.store.GetRelease(r.Context(), app, version, "")
+}
+
+// publicBase returns the scheme://host the user reached us by. Honors a
+// configured override (PublicBaseURL) and the X-Forwarded-Proto header set by
+// reverse proxies.
+func (s *Server) publicBase(r *http.Request) string {
+	if s.cfg.PublicBaseURL != "" {
+		return s.cfg.PublicBaseURL
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+		scheme = p
+	}
+	host := r.Host
+	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+		host = h
+	}
+	return scheme + "://" + host
+}
+
+// installLink returns the URL the install button points at, the label to put
+// on the button, and whether the install can actually proceed.
+func installLink(rel *storage.Release, publicBase string) (string, string, bool) {
+	switch rel.Platform {
+	case "ios":
+		if rel.BundleID == "" {
+			return "#", "iOS install unavailable (no bundle_id)", false
+		}
+		plist := publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/manifest.plist"
+		return "itms-services://?action=download-manifest&url=" + url.QueryEscape(plist), "Install on iOS", true
+	case "android":
+		return publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/download",
+			"Install on Android", true
+	default:
+		return publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/download",
+			"Download", true
+	}
+}
+
+func installTitle(rel *storage.Release) string {
+	if rel.DisplayName != "" {
+		return rel.DisplayName
+	}
+	return rel.AppName
+}
+
+func shortHash(h string) string {
+	if len(h) <= 12 {
+		return h
+	}
+	return h[:12]
+}
+
+// humanSize matches the formatter the CLI uses (kept here so the server has no
+// reverse dep on internal/cli).
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	suffix := []string{"KiB", "MiB", "GiB", "TiB"}[exp]
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffix)
+}

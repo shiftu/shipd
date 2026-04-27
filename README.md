@@ -18,9 +18,9 @@ MVP scaffold. Working today:
 - ✅ SHA-256 verification on download
 - ✅ MCP server (`shipd mcp serve`) — exposes 6 tools to any MCP client
 - ✅ Message gateway: stdio REPL + Feishu adapter (`shipd gateway serve`)
+- ✅ Install pages with QR codes + iOS plist (`/install/{app}/{version}`)
 - 🚧 Message gateway: WeChat-Work / Slack / Telegram adapters (planned)
 - 🚧 AI release-notes generation (planned)
-- 🚧 Install pages with QR codes (planned)
 - 🚧 S3 / R2 / OSS blob backends (planned)
 
 ## Quick start
@@ -38,7 +38,8 @@ export SHIPD_SERVER=http://localhost:8080
 export SHIPD_TOKEN=<the token printed above>
 
 # publish
-./shipd publish ./mybuild.ipa --version 1.0.0 --notes "first release"
+./shipd publish ./mybuild.ipa --version 1.0.0 --notes "first release" \
+  --bundle-id com.example.mybuild --display-name "My Build"
 
 # list
 ./shipd list
@@ -53,6 +54,29 @@ export SHIPD_TOKEN=<the token printed above>
 # pull a release
 ./shipd yank mybuild@1.0.0 --reason "crash on iOS 18"
 ```
+
+## Install pages
+
+`shipd serve` exposes public install pages for each release:
+
+```
+/install/{app}                       latest non-yanked release (HTML)
+/install/{app}/{version}             specific release (HTML)
+/install/{app}/{version}/manifest.plist   iOS install manifest
+/install/{app}/{version}/download    direct artifact (no token required)
+```
+
+The HTML page renders a platform-aware install button (`itms-services://` for
+iOS, direct download for Android and others) and a QR code so a desktop user
+can scan from a phone. iOS releases need `--bundle-id` set on publish; the
+plist endpoint returns `422` with an actionable error otherwise.
+
+For correct install URLs behind TLS termination, set `--public-base-url
+https://your-host` (or `$SHIPD_PUBLIC_BASE_URL`) on `shipd serve`. Without it,
+shipd auto-detects from `Host` and `X-Forwarded-Proto`.
+
+These routes are intentionally PUBLIC — a phone scanning a QR code has no
+token. Front shipd with a reverse proxy if you need to gate them.
 
 ## Using shipd from an Agent (MCP)
 
@@ -178,6 +202,9 @@ docs/              design notes
 | GET | `/api/v1/apps/{name}/latest` | read | latest non-yanked release |
 | POST | `/api/v1/apps/{name}/releases?version=...` | write | publish |
 | POST | `/api/v1/apps/{name}/releases/{version}/yank` | write | mark yanked |
+| GET | `/install/{name}` / `/install/{name}/{version}` | **public** | install page (HTML) |
+| GET | `/install/{name}/{version}/manifest.plist` | **public** | iOS install manifest |
+| GET | `/install/{name}/{version}/download` | **public** | direct artifact |
 
 Token goes in `X-Auth-Token` or `Authorization: Bearer ...`.
 

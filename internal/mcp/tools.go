@@ -189,26 +189,31 @@ func (t *publishTool) Spec() ToolSpec {
 	return ToolSpec{
 		Name: "shipd_publish",
 		Description: "Upload a build artifact to shipd. The agent must provide a local file path; the file is streamed to the server. " +
-			"App name and platform are inferred from the filename when not provided.",
+			"App name and platform are inferred from the filename when not provided. " +
+			"For iOS install pages to work, set bundle_id to the artifact's CFBundleIdentifier.",
 		InputSchema: schema(map[string]any{
-			"file_path": strProp("Absolute path to the artifact (.ipa, .apk, .dmg, etc.)."),
-			"version":   strProp("Release version, e.g. '1.2.3'."),
-			"app":       strProp("App name (default: inferred from filename)."),
-			"channel":   strProp("Release channel (default: stable)."),
-			"platform":  strProp("Platform (default: inferred from extension)."),
-			"notes":     strProp("Release notes."),
+			"file_path":    strProp("Absolute path to the artifact (.ipa, .apk, .dmg, etc.)."),
+			"version":      strProp("Release version, e.g. '1.2.3'."),
+			"app":          strProp("App name (default: inferred from filename)."),
+			"channel":      strProp("Release channel (default: stable)."),
+			"platform":     strProp("Platform (default: inferred from extension)."),
+			"notes":        strProp("Release notes."),
+			"bundle_id":    strProp("iOS CFBundleIdentifier (required for itms-services install)."),
+			"display_name": strProp("Human-readable title shown on install pages."),
 		}, "file_path", "version"),
 	}
 }
 
 func (t *publishTool) Call(ctx context.Context, raw json.RawMessage) (*CallToolResult, error) {
 	var args struct {
-		FilePath string `json:"file_path"`
-		Version  string `json:"version"`
-		App      string `json:"app"`
-		Channel  string `json:"channel"`
-		Platform string `json:"platform"`
-		Notes    string `json:"notes"`
+		FilePath    string `json:"file_path"`
+		Version     string `json:"version"`
+		App         string `json:"app"`
+		Channel     string `json:"channel"`
+		Platform    string `json:"platform"`
+		Notes       string `json:"notes"`
+		BundleID    string `json:"bundle_id"`
+		DisplayName string `json:"display_name"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, err
@@ -233,12 +238,14 @@ func (t *publishTool) Call(ctx context.Context, raw json.RawMessage) (*CallToolR
 		args.Platform = string(pkginfo.Detect(args.FilePath))
 	}
 	rel, err := t.c.Publish(ctx, client.PublishOpts{
-		App:      args.App,
-		Version:  args.Version,
-		Channel:  args.Channel,
-		Platform: args.Platform,
-		Notes:    args.Notes,
-		Filename: base,
+		App:         args.App,
+		Version:     args.Version,
+		Channel:     args.Channel,
+		Platform:    args.Platform,
+		Notes:       args.Notes,
+		Filename:    base,
+		BundleID:    args.BundleID,
+		DisplayName: args.DisplayName,
 	}, f, info.Size())
 	if err != nil {
 		return nil, err

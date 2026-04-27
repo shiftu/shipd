@@ -13,11 +13,13 @@ import (
 
 func newPublishCmd() *cobra.Command {
 	var (
-		appName  string
-		version  string
-		channel  string
-		platform string
-		notes    string
+		appName     string
+		version     string
+		channel     string
+		platform    string
+		notes       string
+		bundleID    string
+		displayName string
 	)
 	cmd := &cobra.Command{
 		Use:   "publish <file>",
@@ -55,12 +57,14 @@ func newPublishCmd() *cobra.Command {
 			defer cancel()
 
 			rel, err := c.Publish(ctx, client.PublishOpts{
-				App:      appName,
-				Version:  version,
-				Channel:  channel,
-				Platform: platform,
-				Notes:    notes,
-				Filename: base,
+				App:         appName,
+				Version:     version,
+				Channel:     channel,
+				Platform:    platform,
+				Notes:       notes,
+				Filename:    base,
+				BundleID:    bundleID,
+				DisplayName: displayName,
 			}, f, info.Size())
 			if err != nil {
 				return err
@@ -76,6 +80,8 @@ func newPublishCmd() *cobra.Command {
 	cmd.Flags().StringVar(&channel, "channel", "stable", "release channel")
 	cmd.Flags().StringVar(&platform, "platform", "", "platform (default: inferred from extension)")
 	cmd.Flags().StringVar(&notes, "notes", "", "release notes")
+	cmd.Flags().StringVar(&bundleID, "bundle-id", "", "iOS bundle identifier (required for ipa install pages)")
+	cmd.Flags().StringVar(&displayName, "display-name", "", "human-readable title shown on install pages")
 	return cmd
 }
 

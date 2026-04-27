@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS releases (
   app_name      TEXT NOT NULL,
   version       TEXT NOT NULL,
   channel       TEXT NOT NULL DEFAULT 'stable',
+  platform      TEXT NOT NULL DEFAULT 'generic',
   blob_key      TEXT NOT NULL,
   size          INTEGER NOT NULL,
   sha256        TEXT NOT NULL,
@@ -39,6 +40,8 @@ CREATE TABLE IF NOT EXISTS releases (
   notes         TEXT NOT NULL DEFAULT '',
   yanked        INTEGER NOT NULL DEFAULT 0,
   yanked_reason TEXT NOT NULL DEFAULT '',
+  bundle_id     TEXT NOT NULL DEFAULT '',
+  display_name  TEXT NOT NULL DEFAULT '',
   created_at    INTEGER NOT NULL,
   PRIMARY KEY(app_name, version, channel),
   FOREIGN KEY(app_name) REFERENCES apps(name)
@@ -80,7 +83,28 @@ func Open(dataDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &Store{db: db, blobDir: filepath.Join(dataDir, "blobs")}, nil
+}
+
+// migrate applies idempotent ALTER TABLEs so a DB created by an older shipd
+// version picks up newly-added columns. Each statement may legitimately fail
+// with "duplicate column" — that just means the migration already ran.
+func migrate(db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE releases ADD COLUMN bundle_id    TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE releases ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE releases ADD COLUMN platform     TEXT NOT NULL DEFAULT 'generic'`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("%s: %w", s, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -136,6 +160,7 @@ type Release struct {
 	AppName      string `json:"app"`
 	Version      string `json:"version"`
 	Channel      string `json:"channel"`
+	Platform     string `json:"platform"`
 	BlobKey      string `json:"-"`
 	Size         int64  `json:"size"`
 	SHA256       string `json:"sha256"`
@@ -143,6 +168,8 @@ type Release struct {
 	Notes        string `json:"notes"`
 	Yanked       bool   `json:"yanked"`
 	YankedReason string `json:"yanked_reason,omitempty"`
+	BundleID     string `json:"bundle_id,omitempty"`
+	DisplayName  string `json:"display_name,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
 }
 
@@ -163,10 +190,15 @@ func (s *Store) PutRelease(ctx context.Context, r Release, body io.Reader) (*Rel
 		r.Channel = "stable"
 	}
 
+	if r.Platform == "" {
+		r.Platform = "generic"
+	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO releases(app_name, version, channel, blob_key, size, sha256, filename, notes, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, r.AppName, r.Version, r.Channel, r.BlobKey, r.Size, r.SHA256, r.Filename, r.Notes, r.CreatedAt)
+		INSERT INTO releases(app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
+		                    bundle_id, display_name, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, r.AppName, r.Version, r.Channel, r.Platform, r.BlobKey, r.Size, r.SHA256, r.Filename, r.Notes,
+		r.BundleID, r.DisplayName, r.CreatedAt)
 	if err != nil {
 		// best-effort blob cleanup; the blob is content-addressed, so leaving it is also fine
 		_ = os.Remove(s.blobPath(blobKey))
@@ -183,8 +215,8 @@ func (s *Store) GetRelease(ctx context.Context, app, version, channel string) (*
 		channel = "stable"
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT app_name, version, channel, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, created_at
+		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
+		       yanked, yanked_reason, bundle_id, display_name, created_at
 		FROM releases
 		WHERE app_name = ? AND version = ? AND channel = ?
 	`, app, version, channel)
@@ -197,8 +229,8 @@ func (s *Store) LatestRelease(ctx context.Context, app, channel string) (*Releas
 		channel = "stable"
 	}
 	row := s.db.QueryRowContext(ctx, `
-		SELECT app_name, version, channel, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, created_at
+		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
+		       yanked, yanked_reason, bundle_id, display_name, created_at
 		FROM releases
 		WHERE app_name = ? AND channel = ? AND yanked = 0
 		ORDER BY created_at DESC, rowid DESC
@@ -209,8 +241,8 @@ func (s *Store) LatestRelease(ctx context.Context, app, channel string) (*Releas
 
 func (s *Store) ListReleases(ctx context.Context, app string) ([]Release, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT app_name, version, channel, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, created_at
+		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
+		       yanked, yanked_reason, bundle_id, display_name, created_at
 		FROM releases
 		WHERE app_name = ?
 		ORDER BY created_at DESC, rowid DESC
@@ -380,8 +412,9 @@ type scanner interface {
 func scanRelease(s scanner) (*Release, error) {
 	var r Release
 	var yanked int
-	if err := s.Scan(&r.AppName, &r.Version, &r.Channel, &r.BlobKey, &r.Size, &r.SHA256,
-		&r.Filename, &r.Notes, &yanked, &r.YankedReason, &r.CreatedAt); err != nil {
+	if err := s.Scan(&r.AppName, &r.Version, &r.Channel, &r.Platform, &r.BlobKey, &r.Size, &r.SHA256,
+		&r.Filename, &r.Notes, &yanked, &r.YankedReason,
+		&r.BundleID, &r.DisplayName, &r.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

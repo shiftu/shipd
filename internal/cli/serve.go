@@ -11,9 +11,10 @@ import (
 
 func newServeCmd() *cobra.Command {
 	var (
-		addr        string
-		dataDir     string
-		publicReads bool
+		addr          string
+		dataDir       string
+		publicReads   bool
+		publicBaseURL string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -30,6 +31,7 @@ func newServeCmd() *cobra.Command {
 				Addr:           addr,
 				PublicReads:    publicReads,
 				BootstrapToken: os.Getenv("SHIPD_BOOTSTRAP_TOKEN"),
+				PublicBaseURL:  publicBaseURL,
 			}, st, log.Default())
 			return s.ListenAndServe(ctx)
 		},
@@ -37,5 +39,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&addr, "addr", ":8080", "listen address")
 	cmd.Flags().StringVar(&dataDir, "data-dir", "./data", "directory for SQLite + blobs")
 	cmd.Flags().BoolVar(&publicReads, "public-reads", false, "allow unauthenticated read endpoints")
+	cmd.Flags().StringVar(&publicBaseURL, "public-base-url", os.Getenv("SHIPD_PUBLIC_BASE_URL"),
+		"public URL prefix for install pages and QR codes (default: derived from request)")
 	return cmd
 }

@@ -151,12 +151,14 @@ func (c *Client) Download(ctx context.Context, app, version, channel string, w i
 // --- write ops ---
 
 type PublishOpts struct {
-	App      string
-	Version  string
-	Channel  string
-	Platform string
-	Notes    string
-	Filename string
+	App         string
+	Version     string
+	Channel     string
+	Platform    string
+	Notes       string
+	Filename    string
+	BundleID    string // iOS CFBundleIdentifier — required for itms-services install
+	DisplayName string // human-readable title shown on the install page
 }
 
 // Publish streams body to the server. ContentLength may be 0 for chunked uploads.
@@ -177,6 +179,12 @@ func (c *Client) Publish(ctx context.Context, opts PublishOpts, body io.Reader, 
 	}
 	if opts.Filename != "" {
 		q.Set("filename", opts.Filename)
+	}
+	if opts.BundleID != "" {
+		q.Set("bundle_id", opts.BundleID)
+	}
+	if opts.DisplayName != "" {
+		q.Set("display_name", opts.DisplayName)
 	}
 	u := c.BaseURL + "/api/v1/apps/" + url.PathEscape(opts.App) + "/releases?" + q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, body)
