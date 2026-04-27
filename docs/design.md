@@ -142,6 +142,28 @@ Notes:
   defend against runaway models, and 1024 output tokens per call to keep
   chat replies short.
 
+### Done (v0.9 — Pluggable blob storage + S3 backend)
+- New `storage.BlobStore` interface decouples the metadata layer (still
+  SQLite) from the bytes-on-disk layer. Two implementations live in
+  `internal/storage/`: `FSBlobStore` (the existing local FS path,
+  unchanged behavior) and `S3BlobStore` (`aws-sdk-go-v2`)
+- Content addressing is preserved across backends: the SHA-256 is computed
+  by streaming the body through a temp file (`stagedBlob`) before naming
+  the destination, so the same bytes always land at the same key
+- S3 backend: `PutObject` is preceded by `HeadObject` to short-circuit
+  re-uploads of identical content; verified with a fake-S3 test that the
+  second publish of the same bytes does NOT re-upload
+- CLI flags on `shipd serve`: `--blob-backend fs|s3`, plus `--s3-bucket`,
+  `--s3-region`, `--s3-endpoint` (for MinIO / R2 / OSS), `--s3-prefix`,
+  `--s3-path-style`. Auth via the standard AWS SDK chain — never on the
+  command line, so no secrets leak into shell history
+- Tests: `FSBlobStoreRoundTrip` (round-trip + dedup),
+  `S3BlobStoreRoundTripAgainstFake` (key composition, dedup short-circuit,
+  byte round-trip), `S3GetMissing` (NotFound mapping)
+- Binary size: +11 MB from the AWS SDK (sso/sts/cognito clients are pulled
+  transitively by the default credential chain). Acceptable for now;
+  build tags to drop S3 from FS-only builds is a future option
+
 ### Done (v0.8 — Feishu WebSocket long-connection mode)
 - `shipd gateway serve --adapter feishu` now defaults to `--feishu-mode
   websocket`, mirroring Hermes Agent's default
@@ -196,7 +218,7 @@ Notes:
 - Stream tool-use loops back into the chat as live updates so a user
   sees "calling shipd_list_releases..." during long ask sessions.
 
-### v0.8 — Cloud storage
+### v0.10 — More cloud storage
 - S3 / R2 / OSS / GCS blob backends via gocloud.dev/blob
 - Optional CDN integration for download endpoints
 

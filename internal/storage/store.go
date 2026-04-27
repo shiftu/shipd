@@ -59,20 +59,29 @@ CREATE TABLE IF NOT EXISTS tokens (
 );
 `
 
-// Store combines metadata (SQLite) and blob storage (filesystem).
+// Store combines metadata (SQLite) and blob storage (an arbitrary BlobStore).
 type Store struct {
-	db      *sql.DB
-	blobDir string
+	db    *sql.DB
+	blobs BlobStore
 }
 
 // Open initializes the store at dataDir, creating subdirectories as needed.
+// If blobs is nil, the default filesystem backend at <dataDir>/blobs is used —
+// preserving the zero-config behavior that's been there since v0.1.
 //
 //	dataDir/
 //	  meta.db        SQLite metadata
-//	  blobs/         content-addressed blob files
-func Open(dataDir string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Join(dataDir, "blobs"), 0o755); err != nil {
-		return nil, fmt.Errorf("mkdir blobs: %w", err)
+//	  blobs/         content-addressed blobs (FS backend default)
+func Open(dataDir string, blobs BlobStore) (*Store, error) {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir data: %w", err)
+	}
+	if blobs == nil {
+		fs, err := NewFSBlobStore(filepath.Join(dataDir, "blobs"))
+		if err != nil {
+			return nil, err
+		}
+		blobs = fs
 	}
 	dbPath := filepath.Join(dataDir, "meta.db")
 	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
@@ -87,7 +96,7 @@ func Open(dataDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db, blobDir: filepath.Join(dataDir, "blobs")}, nil
+	return &Store{db: db, blobs: blobs}, nil
 }
 
 // migrate applies idempotent ALTER TABLEs so a DB created by an older shipd
@@ -176,7 +185,7 @@ type Release struct {
 // PutRelease atomically writes the blob and metadata.
 // If a release with (app, version, channel) already exists, returns ErrAlreadyExists.
 func (s *Store) PutRelease(ctx context.Context, r Release, body io.Reader) (*Release, error) {
-	blobKey, size, sum, err := s.writeBlob(body)
+	blobKey, size, sum, err := s.blobs.Put(ctx, body)
 	if err != nil {
 		return nil, fmt.Errorf("write blob: %w", err)
 	}
@@ -200,8 +209,11 @@ func (s *Store) PutRelease(ctx context.Context, r Release, body io.Reader) (*Rel
 	`, r.AppName, r.Version, r.Channel, r.Platform, r.BlobKey, r.Size, r.SHA256, r.Filename, r.Notes,
 		r.BundleID, r.DisplayName, r.CreatedAt)
 	if err != nil {
-		// best-effort blob cleanup; the blob is content-addressed, so leaving it is also fine
-		_ = os.Remove(s.blobPath(blobKey))
+		// Content-addressed blobs are safe to leave behind on a metadata
+		// failure: a future PutRelease with the same content will collapse
+		// onto the same key. Skip explicit blob cleanup — the cost across
+		// backends (especially S3) outweighs the benefit.
+		_ = blobKey
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyExists
 		}
@@ -282,47 +294,7 @@ func (s *Store) YankRelease(ctx context.Context, app, version, channel, reason s
 
 // OpenBlob returns a reader for the blob backing this release.
 func (s *Store) OpenBlob(r *Release) (io.ReadCloser, error) {
-	return os.Open(s.blobPath(r.BlobKey))
-}
-
-func (s *Store) blobPath(key string) string {
-	if len(key) < 2 {
-		return filepath.Join(s.blobDir, key)
-	}
-	return filepath.Join(s.blobDir, key[:2], key[2:])
-}
-
-// writeBlob streams body to a temp file, computes sha256, then renames into a
-// content-addressed path. Returns the blob key (sha256 hex), size, and digest.
-func (s *Store) writeBlob(body io.Reader) (string, int64, string, error) {
-	tmp, err := os.CreateTemp(s.blobDir, "upload-*")
-	if err != nil {
-		return "", 0, "", err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		// remove tmp if it still exists (i.e. rename did not happen)
-		_ = os.Remove(tmpName)
-	}()
-
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), body)
-	if err != nil {
-		_ = tmp.Close()
-		return "", 0, "", err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", 0, "", err
-	}
-	sum := hex.EncodeToString(h.Sum(nil))
-	dst := s.blobPath(sum)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return "", 0, "", err
-	}
-	if err := os.Rename(tmpName, dst); err != nil {
-		return "", 0, "", err
-	}
-	return sum, n, sum, nil
+	return s.blobs.Get(context.Background(), r.BlobKey)
 }
 
 // --- Tokens ---

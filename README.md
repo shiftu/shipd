@@ -21,8 +21,8 @@ MVP scaffold. Working today:
 - ✅ Install pages with QR codes + iOS plist (`/install/{app}/{version}`)
 - ✅ AI release notes (`shipd publish --ai-notes`)
 - ✅ Free-form `ask` verb on the gateway (LLM picks tools to answer)
+- ✅ Pluggable blob backend: filesystem (default) or S3-compatible (AWS / MinIO / R2 / OSS)
 - 🚧 Message gateway: Slack / Telegram adapters (planned)
-- 🚧 S3 / R2 / OSS blob backends (planned)
 
 ## Quick start
 
@@ -54,6 +54,13 @@ export SHIPD_TOKEN=<the token printed above>
 
 # pull a release
 ./shipd yank mybuild@1.0.0 --reason "crash on iOS 18"
+
+# storage backends — fs is the default, point at S3 for production:
+./shipd serve --blob-backend s3 --s3-bucket my-shipd \
+              --s3-region us-east-1
+# MinIO / R2 / OSS — set --s3-endpoint and --s3-path-style:
+./shipd serve --blob-backend s3 --s3-bucket my-shipd \
+              --s3-endpoint https://minio.example.com --s3-path-style
 
 # generate release notes from git log via Claude
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -245,11 +252,12 @@ as a first-class user. `shipd`'s differentiation is:
 ```
        CLI ─────┐
        MCP ─────┼──► HTTP API ──► Storage ──► SQLite (meta)
-   Gateway ─────┘                          ╰► Filesystem / S3 (blobs)
+   Gateway ─────┘                          ╰► BlobStore: FS | S3-compatible
 ```
 
 - **Storage**: blobs are content-addressed (SHA-256), so an identical artifact
-  uploaded twice is deduplicated for free.
+  uploaded twice is deduplicated for free. The S3 backend uses `HeadObject`
+  before upload to skip redundant network transfer for the same content.
 - **Auth**: tokens are SHA-256 hashed at rest; the plaintext is shown once on
   creation and never recoverable.
 - **Single binary**: no CGO, statically linked, deployable as a distroless

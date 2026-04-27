@@ -27,7 +27,7 @@ func newTokenCmd() *cobra.Command {
 			Short: "Create a new token (printed once, store it now)",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				st, err := storage.Open(dataDir)
+				st, err := storage.Open(dataDir, nil)
 				if err != nil {
 					return err
 				}
@@ -47,7 +47,7 @@ func newTokenCmd() *cobra.Command {
 			Use:   "list",
 			Short: "List token names (does not reveal secrets)",
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				st, err := storage.Open(dataDir)
+				st, err := storage.Open(dataDir, nil)
 				if err != nil {
 					return err
 				}
@@ -70,7 +70,7 @@ func newTokenCmd() *cobra.Command {
 			Short: "Delete a token by name",
 			Args:  cobra.ExactArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
-				st, err := storage.Open(dataDir)
+				st, err := storage.Open(dataDir, nil)
 				if err != nil {
 					return err
 				}
