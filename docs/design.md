@@ -142,7 +142,20 @@ Notes:
   defend against runaway models, and 1024 output tokens per call to keep
   chat replies short.
 
-### v0.6 — More AI
+### Done (v0.6 — WeChat Work adapter)
+- `shipd gateway serve --adapter wechat-work` shipped
+- Implements the full WeChat Work app callback contract: SHA1 msg_signature
+  verification, AES-256-CBC message decryption with PKCS#7 unpadding,
+  corp_id check on every payload, fast 200-ack with async dispatch
+- Replies via the active `/cgi-bin/message/send` API; access tokens are
+  cached with 60s pre-expiry refresh
+- "Scan to chat" onboarding: `/wxwork/qrcode` proxies the app's QR image
+  from Tencent (cached 30 min); `/wxwork/onboard` renders a Chinese
+  HTML page embedding the QR + scan instructions for non-developers
+- Hand-rolled crypto with round-trip and signature tests passing; no
+  external crypto deps
+
+### v0.7 — More AI
 - Crash clustering: if a `crash report` API is added, embed stacktraces
   and cluster.
 - Natural-language query: "which version had the highest crash rate last
@@ -150,7 +163,7 @@ Notes:
 - Stream tool-use loops back into the chat as live updates so a user
   sees "calling shipd_list_releases..." during long ask sessions.
 
-### v0.7 — Cloud storage
+### v0.8 — Cloud storage
 - S3 / R2 / OSS / GCS blob backends via gocloud.dev/blob
 - Optional CDN integration for download endpoints
 

@@ -17,11 +17,11 @@ MVP scaffold. Working today:
 - ✅ API token auth (write tokens vs. public reads)
 - ✅ SHA-256 verification on download
 - ✅ MCP server (`shipd mcp serve`) — exposes 6 tools to any MCP client
-- ✅ Message gateway: stdio REPL + Feishu adapter (`shipd gateway serve`)
+- ✅ Message gateway: stdio + Feishu + WeChat-Work adapters (`shipd gateway serve`)
 - ✅ Install pages with QR codes + iOS plist (`/install/{app}/{version}`)
 - ✅ AI release notes (`shipd publish --ai-notes`)
 - ✅ Free-form `ask` verb on the gateway (LLM picks tools to answer)
-- 🚧 Message gateway: WeChat-Work / Slack / Telegram adapters (planned)
+- 🚧 Message gateway: Slack / Telegram adapters (planned)
 - 🚧 S3 / R2 / OSS blob backends (planned)
 
 ## Quick start
@@ -140,6 +140,30 @@ Then in the Feishu Open Platform:
 3. Add the bot to a group; chat with it: `@bot list`, `@bot info myapp`,
    `@bot yank myapp@1.0.0 reason="crash"`
 
+### WeChat Work / 企业微信 (扫码接入)
+
+```bash
+shipd gateway serve --adapter wechat-work --addr :8082 \
+  --wxwork-corp-id     $WXWORK_CORP_ID \
+  --wxwork-agent-id    $WXWORK_AGENT_ID \
+  --wxwork-secret      $WXWORK_SECRET \
+  --wxwork-token       $WXWORK_TOKEN \
+  --wxwork-aes-key     $WXWORK_ENCODING_AES_KEY
+```
+
+Then in 企业微信管理后台 → 应用管理 → your app → 接收消息:
+
+1. Set 接收消息的 URL to `https://your-host:8082/wxwork/event`
+2. Use the same Token and EncodingAESKey you passed to shipd
+3. Encryption mode must be **安全模式** (encrypted)
+
+Onboarding (the QR-code flow):
+
+- Open `https://your-host:8082/wxwork/onboard` in any browser
+- A QR code is shown — fetched live from Tencent and cached for 30 minutes
+- Scan it with the **企业微信 App** to enter the bot's chat
+- Send `help`, `info myapp`, or `ask 最近发布了什么？`
+
 Chat verbs (same as the stdio REPL):
 
 | Verb | Behavior |
@@ -190,7 +214,7 @@ internal/client/   tiny Go SDK used by the CLI
 internal/server/   HTTP server + handlers + auth middleware + install pages
 internal/storage/  SQLite metadata + blob filesystem
 internal/mcp/      JSON-RPC stdio MCP server + tool registry + shipd tools
-internal/gateway/  chat-message router + stdio + Feishu adapters
+internal/gateway/  chat-message router + stdio + Feishu + WeChat-Work adapters
 internal/ai/       Anthropic API client, release-notes generator, tool-use agent
 internal/pkginfo/  artifact platform detection + app-name inference
 docs/              design notes

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"strconv"
 
 	"github.com/shiftu/shipd/internal/ai"
 	"github.com/shiftu/shipd/internal/gateway"
@@ -54,11 +55,17 @@ func newGatewayCmd() *cobra.Command {
 			return a.Run(ctx, router.Dispatch)
 		},
 	}
-	serve.Flags().StringVar(&adapter, "adapter", "stdio", "adapter: stdio | feishu")
-	serve.Flags().String("addr", ":8081", "listen address (feishu only)")
+	serve.Flags().StringVar(&adapter, "adapter", "stdio", "adapter: stdio | feishu | wechat-work")
+	serve.Flags().String("addr", ":8081", "listen address (HTTP adapters only)")
+	serve.Flags().String("public-base-url", os.Getenv("SHIPD_GATEWAY_PUBLIC_BASE_URL"), "public URL prefix for onboarding pages (default: derived from request)")
 	serve.Flags().String("feishu-app-id", os.Getenv("FEISHU_APP_ID"), "Feishu app ID (or $FEISHU_APP_ID)")
 	serve.Flags().String("feishu-app-secret", os.Getenv("FEISHU_APP_SECRET"), "Feishu app secret (or $FEISHU_APP_SECRET)")
 	serve.Flags().String("feishu-verification-token", os.Getenv("FEISHU_VERIFICATION_TOKEN"), "Feishu event verification token (or $FEISHU_VERIFICATION_TOKEN)")
+	serve.Flags().String("wxwork-corp-id", os.Getenv("WXWORK_CORP_ID"), "WeChat Work corp ID (or $WXWORK_CORP_ID)")
+	serve.Flags().Int("wxwork-agent-id", envInt("WXWORK_AGENT_ID"), "WeChat Work app agent ID (or $WXWORK_AGENT_ID)")
+	serve.Flags().String("wxwork-secret", os.Getenv("WXWORK_SECRET"), "WeChat Work app secret (or $WXWORK_SECRET)")
+	serve.Flags().String("wxwork-token", os.Getenv("WXWORK_TOKEN"), "WeChat Work callback verification token (or $WXWORK_TOKEN)")
+	serve.Flags().String("wxwork-aes-key", os.Getenv("WXWORK_ENCODING_AES_KEY"), "WeChat Work 43-char EncodingAESKey (or $WXWORK_ENCODING_AES_KEY)")
 	serve.Flags().String("ai-model", "", "Claude model for the 'ask' verb (default: claude-sonnet-4-6, requires $ANTHROPIC_API_KEY)")
 
 	cmd.AddCommand(serve)
@@ -87,9 +94,40 @@ func buildAdapter(name string, cmd *cobra.Command) (gateway.Adapter, error) {
 			AppSecret:         appSecret,
 			VerificationToken: vtok,
 		}, log.Default()), nil
+	case "wechat-work":
+		addr, _ := cmd.Flags().GetString("addr")
+		publicBase, _ := cmd.Flags().GetString("public-base-url")
+		corpID, _ := cmd.Flags().GetString("wxwork-corp-id")
+		agentID, _ := cmd.Flags().GetInt("wxwork-agent-id")
+		secret, _ := cmd.Flags().GetString("wxwork-secret")
+		token, _ := cmd.Flags().GetString("wxwork-token")
+		aesKey, _ := cmd.Flags().GetString("wxwork-aes-key")
+		if corpID == "" || agentID == 0 || secret == "" || token == "" || aesKey == "" {
+			return nil, errors.New("wechat-work adapter needs --wxwork-corp-id, --wxwork-agent-id, --wxwork-secret, --wxwork-token, --wxwork-aes-key")
+		}
+		return gateway.NewWechatWorkAdapter(gateway.WechatWorkConfig{
+			Addr:           addr,
+			CorpID:         corpID,
+			AgentID:        agentID,
+			Secret:         secret,
+			Token:          token,
+			EncodingAESKey: aesKey,
+			PublicBaseURL:  publicBase,
+		}, log.Default())
 	default:
 		return nil, errors.New("unknown adapter " + name)
 	}
+}
+
+// envInt reads an integer from an env var, returning 0 if unset/invalid.
+// Used for cobra Int flags whose defaults come from the environment.
+func envInt(name string) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(v)
+	return n
 }
 
 func firstNonEmpty(values ...string) string {
