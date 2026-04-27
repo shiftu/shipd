@@ -21,10 +21,12 @@ type Tool interface {
 
 // Server speaks MCP over an io.Reader/io.Writer pair (typically stdin/stdout).
 // Logs go to a separate logger so they don't pollute the JSON-RPC channel.
+//
+// Server embeds *Registry so callers can `srv.Register(tool)` directly.
 type Server struct {
+	*Registry
 	name    string
 	version string
-	tools   map[string]Tool
 	log     *log.Logger
 
 	wmu sync.Mutex // serializes writes
@@ -32,15 +34,11 @@ type Server struct {
 
 func NewServer(name, version string, logger *log.Logger) *Server {
 	return &Server{
-		name:    name,
-		version: version,
-		tools:   map[string]Tool{},
-		log:     logger,
+		Registry: NewRegistry(),
+		name:     name,
+		version:  version,
+		log:      logger,
 	}
-}
-
-func (s *Server) Register(t Tool) {
-	s.tools[t.Spec().Name] = t
 }
 
 // Serve reads JSON-RPC messages from r line-by-line and writes responses to w.
@@ -95,7 +93,7 @@ func (s *Server) handleLine(ctx context.Context, line []byte, w io.Writer) {
 		// no-op
 	case "tools/list":
 		var specs []ToolSpec
-		for _, t := range s.tools {
+		for _, t := range s.List() {
 			specs = append(specs, t.Spec())
 		}
 		s.writeResult(w, env.ID, ListToolsResult{Tools: specs})
@@ -105,7 +103,7 @@ func (s *Server) handleLine(ctx context.Context, line []byte, w io.Writer) {
 			s.writeErr(w, env.ID, codeInvalidParams, err.Error())
 			return
 		}
-		t, ok := s.tools[p.Name]
+		t, ok := s.Get(p.Name)
 		if !ok {
 			s.writeResult(w, env.ID, textError(fmt.Sprintf("unknown tool %q", p.Name)))
 			return

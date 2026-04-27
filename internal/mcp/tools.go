@@ -13,16 +13,16 @@ import (
 	"github.com/shiftu/shipd/internal/pkginfo"
 )
 
-// RegisterShipdTools wires the shipd HTTP client up as a set of MCP tools.
-// All tools are namespaced with the "shipd_" prefix so they don't collide with
-// other servers a user has loaded.
-func RegisterShipdTools(s *Server, c *client.Client, baseURL string) {
-	s.Register(&listAppsTool{c: c})
-	s.Register(&listReleasesTool{c: c})
-	s.Register(&getReleaseTool{c: c})
-	s.Register(&yankReleaseTool{c: c})
-	s.Register(&publishTool{c: c})
-	s.Register(&downloadURLTool{c: c, baseURL: strings.TrimRight(baseURL, "/")})
+// RegisterShipdTools wires the shipd HTTP client up as a set of tools on the
+// given registry. All tools are namespaced with the "shipd_" prefix so they
+// don't collide with other servers a user has loaded.
+func RegisterShipdTools(r *Registry, c *client.Client, baseURL string) {
+	r.Register(&listAppsTool{c: c})
+	r.Register(&listReleasesTool{c: c})
+	r.Register(&getReleaseTool{c: c})
+	r.Register(&yankReleaseTool{c: c})
+	r.Register(&publishTool{c: c})
+	r.Register(&downloadURLTool{c: c, baseURL: strings.TrimRight(baseURL, "/")})
 }
 
 // schema is a tiny helper to keep tool schema declarations readable.

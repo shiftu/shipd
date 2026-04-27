@@ -94,21 +94,31 @@ Notes:
 - Hand-rolled JSON-RPC dispatcher (no external MCP dep), spec-compliant
   enough for Claude Desktop / Cursor
 
-### v0.3 — Install pages
+### Done (v0.3 — Message gateway)
+- `shipd gateway serve --adapter <stdio|feishu>` shipped
+- Reuses the MCP `Registry` so chat verbs and MCP tools share one impl
+- Chat verbs: `list`, `info`, `url`, `yank`, `help`
+- Stdio adapter is a local REPL useful for development
+- Feishu adapter implements URL-verification handshake, message events
+  (`im.message.receive_v1`), tenant-token caching with 60s pre-expiry
+  refresh, and reply via `im/v1/messages`
+- Encrypted Feishu payloads, Slack, WeChat-Work, Telegram are deferred —
+  the Adapter interface is small enough that a new transport is ~150 LOC
+
+### v0.4 — Install pages
 - `/install/{app}` HTML page with QR code and platform-specific install link
   (`itms-services://...` for iOS plist, direct APK for Android)
 - Plist generator for iOS enterprise / ad-hoc distribution
 - Optional download tokens: short-lived URL-signed downloads for sharing
 
-### v0.4 — Message gateway
-- `shipd gateway serve` with adapter plugins
-- Adapters: Feishu (lark), WeChat Work, Slack, Telegram
-- Routing: `@bot <command> <args>` → CLI dispatch → reply with formatted result
+### v0.5 — More gateway adapters
+- WeChat Work, Slack, Telegram
+- Feishu encrypted payload support (AES-256-CBC unwrap)
 - Streaming: long-running commands stream output back as message updates
 - Optional LLM mode: free-form `@bot ask "..."` runs through an Agent with
   shipd's MCP tools available
 
-### v0.5 — AI hooks
+### v0.6 — AI hooks
 - `--ai-notes`: pull `git log` since the last release, generate structured
   release notes with Claude
 - Crash clustering: if a `crash report` API is added, embed stacktraces and
@@ -116,7 +126,7 @@ Notes:
 - Natural-language query: "which version had the highest crash rate last
   week?" → SQL/aggregate
 
-### v0.6 — Cloud storage
+### v0.7 — Cloud storage
 - S3 / R2 / OSS / GCS blob backends via gocloud.dev/blob
 - Optional CDN integration for download endpoints
 

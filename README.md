@@ -17,7 +17,8 @@ MVP scaffold. Working today:
 - ✅ API token auth (write tokens vs. public reads)
 - ✅ SHA-256 verification on download
 - ✅ MCP server (`shipd mcp serve`) — exposes 6 tools to any MCP client
-- 🚧 Message gateway: Feishu / WeChat-Work / Slack adapters (planned)
+- ✅ Message gateway: stdio REPL + Feishu adapter (`shipd gateway serve`)
+- 🚧 Message gateway: WeChat-Work / Slack / Telegram adapters (planned)
 - 🚧 AI release-notes generation (planned)
 - 🚧 Install pages with QR codes (planned)
 - 🚧 S3 / R2 / OSS blob backends (planned)
@@ -81,6 +82,46 @@ The agent then sees these tools:
 | `shipd_download_url` | direct download URL for a release |
 | `shipd_yank_release` | mark a release as withdrawn |
 
+## Using shipd from chat (Gateway)
+
+`shipd gateway serve` runs an adapter that turns chat messages into the same
+tool calls. Two adapters today:
+
+### Local REPL (development)
+
+```bash
+shipd gateway serve --adapter stdio
+shipd> list
+shipd> info myapp
+shipd> yank myapp@1.0.0 reason="crash on iOS 18"
+```
+
+### Feishu / Lark
+
+```bash
+shipd gateway serve --adapter feishu --addr :8081 \
+  --feishu-app-id $FEISHU_APP_ID \
+  --feishu-app-secret $FEISHU_APP_SECRET \
+  --feishu-verification-token $FEISHU_VERIFICATION_TOKEN
+```
+
+Then in the Feishu Open Platform:
+1. Set the event subscription URL to `https://your-host:8081/feishu/event`
+2. Subscribe to `im.message.receive_v1`
+3. Add the bot to a group; chat with it: `@bot list`, `@bot info myapp`,
+   `@bot yank myapp@1.0.0 reason="crash"`
+
+Chat verbs (same as the stdio REPL):
+
+| Verb | Behavior |
+|---|---|
+| `list` | list all apps |
+| `list <app>` | list releases for an app |
+| `info <app>[@<version>]` | release metadata, latest by default |
+| `url <app>[@<version>]` | direct download URL |
+| `yank <app>@<version> [reason="..."]` | withdraw a release |
+| `help` | show this list |
+
 ## Why another distribution platform?
 
 The existing self-hosted options (app-space, zealot, fir.im, significa) were
@@ -118,7 +159,8 @@ internal/cli/      cobra subcommands (CLI surface)
 internal/client/   tiny Go SDK used by the CLI
 internal/server/   HTTP server + handlers + auth middleware
 internal/storage/  SQLite metadata + blob filesystem
-internal/mcp/      JSON-RPC stdio MCP server + shipd tools
+internal/mcp/      JSON-RPC stdio MCP server + tool registry + shipd tools
+internal/gateway/  chat-message router + stdio + Feishu adapters
 internal/pkginfo/  artifact platform detection + app-name inference
 docs/              design notes
 ```

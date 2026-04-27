@@ -31,7 +31,7 @@ func newMCPCmd() *cobra.Command {
 
 			logger := log.New(os.Stderr, "[shipd-mcp] ", log.LstdFlags)
 			s := mcp.NewServer("shipd", versionFromCmd(cmd), logger)
-			mcp.RegisterShipdTools(s, c, c.BaseURL)
+			mcp.RegisterShipdTools(s.Registry, c, c.BaseURL)
 			logger.Printf("ready")
 			return s.Serve(ctx, os.Stdin, os.Stdout)
 		},
