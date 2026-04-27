@@ -1,0 +1,120 @@
+# shipd
+
+> AI-native package distribution. CLI-first, agent-friendly, single binary.
+
+`shipd` is a build-artifact distribution platform designed for the LLM-agent
+era. Where traditional platforms (app-space, zealot, fir.im) put a Web UI
+first, `shipd` is built around a CLI and a JSON API, with planned MCP and
+message-gateway frontends so that **an Agent can publish, list, query, yank,
+and roll back releases as fluently as a human can**.
+
+## Status
+
+MVP scaffold. Working today:
+
+- ✅ Single-binary server (`shipd serve`) — SQLite metadata + content-addressed blob storage
+- ✅ CLI: `publish`, `list`, `info`, `download`, `yank`, `token`
+- ✅ API token auth (write tokens vs. public reads)
+- ✅ SHA-256 verification on download
+- 🚧 MCP server (planned)
+- 🚧 Message gateway: Feishu / WeChat-Work / Slack adapters (planned)
+- 🚧 AI release-notes generation (planned)
+- 🚧 Install pages with QR codes (planned)
+- 🚧 S3 / R2 / OSS blob backends (planned)
+
+## Quick start
+
+```bash
+# build
+make build
+
+# create a data dir + bootstrap token
+SHIPD_BOOTSTRAP_TOKEN=$(./shipd token create bootstrap --data-dir ./data 2>/dev/null) \
+  ./shipd serve --data-dir ./data --addr :8080 &
+
+# point the CLI at it
+export SHIPD_SERVER=http://localhost:8080
+export SHIPD_TOKEN=<the token printed above>
+
+# publish
+./shipd publish ./mybuild.ipa --version 1.0.0 --notes "first release"
+
+# list
+./shipd list
+./shipd list mybuild
+
+# inspect the latest
+./shipd info mybuild
+
+# download by version (sha256 verified)
+./shipd download mybuild@1.0.0 -o ./out
+
+# pull a release
+./shipd yank mybuild@1.0.0 --reason "crash on iOS 18"
+```
+
+## Why another distribution platform?
+
+The existing self-hosted options (app-space, zealot, fir.im, significa) were
+built for humans clicking buttons in 2017–2020. None of them treat an Agent
+as a first-class user. `shipd`'s differentiation is:
+
+| | app-space | zealot | significa | **shipd** |
+|---|---|---|---|---|
+| CLI is a first-class interface | ❌ | fastlane plugin | ❌ | ✅ |
+| MCP server | ❌ | ❌ | ❌ | 🚧 |
+| Message gateway (Feishu/WeChat/Slack) | ❌ | ❌ | ❌ | 🚧 |
+| AI-generated release notes | ❌ | ❌ | ❌ | 🚧 |
+| Single binary deployment | ❌ | ❌ | ✅ | ✅ |
+
+## Architecture
+
+```
+       CLI ─────┐
+       MCP ─────┼──► HTTP API ──► Storage ──► SQLite (meta)
+   Gateway ─────┘                          ╰► Filesystem / S3 (blobs)
+```
+
+- **Storage**: blobs are content-addressed (SHA-256), so an identical artifact
+  uploaded twice is deduplicated for free.
+- **Auth**: tokens are SHA-256 hashed at rest; the plaintext is shown once on
+  creation and never recoverable.
+- **Single binary**: no CGO, statically linked, deployable as a distroless
+  container or a plain executable.
+
+## Layout
+
+```
+cmd/shipd/         entry point
+internal/cli/      cobra subcommands (CLI surface)
+internal/client/   tiny Go SDK used by the CLI
+internal/server/   HTTP server + handlers + auth middleware
+internal/storage/  SQLite metadata + blob filesystem
+internal/pkginfo/  artifact platform detection (.ipa/.apk/...)
+docs/              design notes
+```
+
+## API
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/healthz` | — | liveness |
+| GET | `/api/v1/apps` | read | list apps |
+| GET | `/api/v1/apps/{name}` | read | app metadata |
+| GET | `/api/v1/apps/{name}/releases` | read | list releases |
+| GET | `/api/v1/apps/{name}/releases/{version}` | read | release metadata |
+| GET | `/api/v1/apps/{name}/releases/{version}/download` | read | download blob |
+| GET | `/api/v1/apps/{name}/latest` | read | latest non-yanked release |
+| POST | `/api/v1/apps/{name}/releases?version=...` | write | publish |
+| POST | `/api/v1/apps/{name}/releases/{version}/yank` | write | mark yanked |
+
+Token goes in `X-Auth-Token` or `Authorization: Bearer ...`.
+
+## Roadmap
+
+See [docs/design.md](docs/design.md) for the full design rationale and the
+6-week roadmap toward MCP + message-gateway support.
+
+## License
+
+GPL-3.0 — see [LICENSE](LICENSE).

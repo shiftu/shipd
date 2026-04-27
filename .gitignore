@@ -1,0 +1,22 @@
+# Binaries
+/shipd
+/dist/
+*.exe
+*.test
+*.out
+
+# Local data
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Env
+.env
+.env.local
