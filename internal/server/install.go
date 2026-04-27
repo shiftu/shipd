@@ -34,7 +34,7 @@ type installPageData struct {
 	SHA256Short  string
 	PublishedAt  string
 	Notes        string
-	InstallURL   string // itms-services:// for iOS, direct download for everything else
+	InstallURL   template.URL // itms-services:// for iOS, direct download for everything else. template.URL bypasses html/template's scheme allowlist (which would otherwise rewrite itms-services to #ZgotmplZ).
 	InstallLabel string
 	CanInstall   bool   // false when the artifact is missing required metadata (e.g. iOS without bundle_id)
 	QRCode       string // base64-encoded PNG, empty if generation fails (page still renders)
@@ -80,7 +80,10 @@ func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
 		Yanked:       rel.Yanked,
 		YankedReason: rel.YankedReason,
 	}
-	data.InstallURL, data.InstallLabel, data.CanInstall = installLink(rel, publicBase)
+	installURL, installLabel, canInstall := installLink(rel, publicBase)
+	data.InstallURL = template.URL(installURL)
+	data.InstallLabel = installLabel
+	data.CanInstall = canInstall
 
 	if png, err := qrcode.Encode(pageURL, qrcode.Medium, 320); err == nil {
 		data.QRCode = base64.StdEncoding.EncodeToString(png)
