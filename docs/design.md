@@ -142,6 +142,21 @@ Notes:
   defend against runaway models, and 1024 output tokens per call to keep
   chat replies short.
 
+### Done (v0.8 — Feishu WebSocket long-connection mode)
+- `shipd gateway serve --adapter feishu` now defaults to `--feishu-mode
+  websocket`, mirroring Hermes Agent's default
+- Long-connection path uses `github.com/larksuite/oapi-sdk-go/v3/ws` —
+  the official Lark Go SDK handles dial, auth, heartbeat, the proprietary
+  protobuf-framed event stream, and auto-reconnect
+- Inbound events go through `dispatcher.OnP2MessageReceiveV1`; the
+  webhook path is preserved as `--feishu-mode webhook`
+- Replies still go via the IM REST API (`Im.V1.Message.Create`) — Lark's
+  WS channel only carries inbound, even when both directions look "live"
+- Operationally this removes shipd's hard dependency on a public-reachable
+  HTTPS endpoint and SSL termination for Feishu — outbound HTTPS is enough
+- Binary size: +2.1 MB from the SDK pull (gogo/protobuf, gorilla/websocket,
+  lark service models). Acceptable for the UX win
+
 ### Done (v0.7 — WeChat personal-account adapter via iLink)
 - `shipd gateway weixin-login` runs an interactive QR login (ASCII QR
   rendered in the terminal) against Tencent's iLink endpoint and persists

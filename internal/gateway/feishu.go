@@ -19,15 +19,23 @@ import (
 //
 // AppID and AppSecret come from the Feishu Open Platform app dashboard.
 // VerificationToken comes from the same dashboard's "Event Subscription" tab
-// and is the value compared against header.token on every incoming event.
+// and is the value compared against header.token on every incoming event in
+// webhook mode (ignored in websocket mode).
 //
-// Encrypted event payloads are NOT supported in this build — leave
-// encryption disabled in your Feishu app settings.
+// Mode selects the transport:
+//
+//	"websocket" — long connection out to open.feishu.cn (default; no public
+//	              webhook URL needed). Mirrors Hermes Agent's default.
+//	"webhook"   — HTTP receiver on Addr, requires a public-reachable URL.
+//
+// Encrypted webhook payloads are NOT supported. Leave encryption disabled
+// in your Feishu app's event-subscription config when using webhook mode.
 type FeishuConfig struct {
-	Addr              string // listen address, e.g. ":8081"
+	Mode              string // "websocket" (default) | "webhook"
+	Addr              string // webhook listen address (webhook mode only)
 	AppID             string
 	AppSecret         string
-	VerificationToken string
+	VerificationToken string // webhook mode only
 	BaseURL           string // override for testing; defaults to https://open.feishu.cn
 }
 
@@ -56,7 +64,26 @@ func NewFeishuAdapter(cfg FeishuConfig, logger *log.Logger) *FeishuAdapter {
 
 func (f *FeishuAdapter) Name() string { return "feishu" }
 
+// Run dispatches based on the configured mode. websocket is the default — it
+// matches the Hermes Agent default and doesn't require a public callback URL.
 func (f *FeishuAdapter) Run(ctx context.Context, dispatch DispatchFn) error {
+	mode := f.cfg.Mode
+	if mode == "" {
+		mode = "websocket"
+	}
+	switch mode {
+	case "websocket":
+		return f.runWebSocket(ctx, dispatch)
+	case "webhook":
+		return f.runWebhook(ctx, dispatch)
+	default:
+		return fmt.Errorf("feishu: unknown mode %q (want websocket or webhook)", mode)
+	}
+}
+
+// runWebhook is the original HTTP-receiver path, kept available for users
+// whose deployments terminate inbound webhooks through a reverse proxy.
+func (f *FeishuAdapter) runWebhook(ctx context.Context, dispatch DispatchFn) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /feishu/event", f.handleEvent(ctx, dispatch))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -67,7 +94,7 @@ func (f *FeishuAdapter) Run(ctx context.Context, dispatch DispatchFn) error {
 		<-ctx.Done()
 		_ = hs.Shutdown(context.Background())
 	}()
-	f.log.Printf("feishu adapter listening on %s", f.cfg.Addr)
+	f.log.Printf("feishu adapter listening on %s (mode=webhook)", f.cfg.Addr)
 	if err := hs.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

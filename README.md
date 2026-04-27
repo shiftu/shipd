@@ -127,18 +127,38 @@ shipd> yank myapp@1.0.0 reason="crash on iOS 18"
 
 ### Feishu / Lark
 
+Two transports — pick by `--feishu-mode`:
+
+#### WebSocket long-connection (default, no public URL needed)
+
 ```bash
-shipd gateway serve --adapter feishu --addr :8081 \
-  --feishu-app-id $FEISHU_APP_ID \
-  --feishu-app-secret $FEISHU_APP_SECRET \
-  --feishu-verification-token $FEISHU_VERIFICATION_TOKEN
+shipd gateway serve --adapter feishu \
+  --feishu-app-id     $FEISHU_APP_ID \
+  --feishu-app-secret $FEISHU_APP_SECRET
 ```
 
-Then in the Feishu Open Platform:
-1. Set the event subscription URL to `https://your-host:8081/feishu/event`
+shipd dials `open.feishu.cn` over outbound HTTPS, holds a long connection,
+and receives events through it. Auto-reconnects on transient drops (provided
+by `lark-oapi-sdk-go`). This is what Hermes Agent uses by default — no
+public webhook URL, no SSL termination.
+
+In the Feishu Open Platform:
+1. Enable "事件订阅" → "长连接 (WebSocket)" mode
 2. Subscribe to `im.message.receive_v1`
-3. Add the bot to a group; chat with it: `@bot list`, `@bot info myapp`,
-   `@bot yank myapp@1.0.0 reason="crash"`
+3. Add the bot to a chat — `@bot list`, `@bot info myapp`, etc.
+
+#### Webhook (when you have a public URL anyway)
+
+```bash
+shipd gateway serve --adapter feishu --feishu-mode webhook --addr :8081 \
+  --feishu-app-id              $FEISHU_APP_ID \
+  --feishu-app-secret          $FEISHU_APP_SECRET \
+  --feishu-verification-token  $FEISHU_VERIFICATION_TOKEN
+```
+
+Set the event subscription URL to `https://your-host:8081/feishu/event` and
+subscribe to `im.message.receive_v1`. Encrypted payloads are not supported
+in this build.
 
 ### WeChat (personal account) via iLink
 

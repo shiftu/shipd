@@ -58,9 +58,10 @@ func newGatewayCmd() *cobra.Command {
 	serve.Flags().StringVar(&adapter, "adapter", "stdio", "adapter: stdio | feishu | wechat-work | weixin")
 	serve.Flags().String("addr", ":8081", "listen address (HTTP adapters only)")
 	serve.Flags().String("public-base-url", os.Getenv("SHIPD_GATEWAY_PUBLIC_BASE_URL"), "public URL prefix for onboarding pages (default: derived from request)")
+	serve.Flags().String("feishu-mode", firstNonEmpty(os.Getenv("FEISHU_MODE"), "websocket"), "Feishu transport: websocket (default, no public URL needed) | webhook")
 	serve.Flags().String("feishu-app-id", os.Getenv("FEISHU_APP_ID"), "Feishu app ID (or $FEISHU_APP_ID)")
 	serve.Flags().String("feishu-app-secret", os.Getenv("FEISHU_APP_SECRET"), "Feishu app secret (or $FEISHU_APP_SECRET)")
-	serve.Flags().String("feishu-verification-token", os.Getenv("FEISHU_VERIFICATION_TOKEN"), "Feishu event verification token (or $FEISHU_VERIFICATION_TOKEN)")
+	serve.Flags().String("feishu-verification-token", os.Getenv("FEISHU_VERIFICATION_TOKEN"), "Feishu event verification token (webhook mode only; or $FEISHU_VERIFICATION_TOKEN)")
 	serve.Flags().String("wxwork-corp-id", os.Getenv("WXWORK_CORP_ID"), "WeChat Work corp ID (or $WXWORK_CORP_ID)")
 	serve.Flags().Int("wxwork-agent-id", envInt("WXWORK_AGENT_ID"), "WeChat Work app agent ID (or $WXWORK_AGENT_ID)")
 	serve.Flags().String("wxwork-secret", os.Getenv("WXWORK_SECRET"), "WeChat Work app secret (or $WXWORK_SECRET)")
@@ -86,6 +87,7 @@ func buildAdapter(name string, cmd *cobra.Command) (gateway.Adapter, error) {
 			Prompt: "shipd> ",
 		}, nil
 	case "feishu":
+		mode, _ := cmd.Flags().GetString("feishu-mode")
 		addr, _ := cmd.Flags().GetString("addr")
 		appID, _ := cmd.Flags().GetString("feishu-app-id")
 		appSecret, _ := cmd.Flags().GetString("feishu-app-secret")
@@ -94,6 +96,7 @@ func buildAdapter(name string, cmd *cobra.Command) (gateway.Adapter, error) {
 			return nil, errors.New("feishu adapter needs --feishu-app-id and --feishu-app-secret")
 		}
 		return gateway.NewFeishuAdapter(gateway.FeishuConfig{
+			Mode:              mode,
 			Addr:              addr,
 			AppID:             appID,
 			AppSecret:         appSecret,
