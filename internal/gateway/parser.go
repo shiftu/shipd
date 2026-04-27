@@ -11,6 +11,7 @@ type command struct {
 	Tool string         // resolved MCP tool name
 	Args map[string]any // arguments to marshal as the tool's JSON input
 	Help bool           // true for an empty message or "help"
+	Ask  string         // non-empty → free-form LLM question
 }
 
 // chatAliases describes the chat verbs we accept. Used by the help text.
@@ -23,6 +24,7 @@ var chatAliases = []struct {
 	{usage: "info <app>[@<version>]", desc: "Show release metadata (latest by default)."},
 	{usage: "url <app>[@<version>]", desc: "Print a direct download URL."},
 	{usage: "yank <app>@<version> [reason=\"...\"]", desc: "Withdraw a published release."},
+	{usage: "ask <question...>", desc: "Free-form question; an LLM picks tools to answer (requires ANTHROPIC_API_KEY)."},
 }
 
 // parseCommand turns a chat string into a tool invocation. It accepts the
@@ -35,6 +37,16 @@ func parseCommand(text string) (*command, error) {
 	if text == "" || text == "help" {
 		return &command{Help: true}, nil
 	}
+
+	// "ask" is parsed before tokenization so the question keeps its original
+	// punctuation, quotes, and casing — the LLM gets the user's text verbatim.
+	if rest, ok := stripVerbPrefix(text, "ask"); ok {
+		if rest == "" {
+			return nil, fmt.Errorf("ask requires a question")
+		}
+		return &command{Verb: "ask", Ask: rest}, nil
+	}
+
 	tokens := tokenize(text)
 	if len(tokens) == 0 {
 		return &command{Help: true}, nil
@@ -84,6 +96,24 @@ func parseCommand(text string) (*command, error) {
 	default:
 		return nil, fmt.Errorf("unknown verb %q (try 'help')", verb)
 	}
+}
+
+// stripVerbPrefix returns the text after the leading verb (case-insensitive)
+// followed by whitespace. Returns ok=false if text doesn't start with verb.
+func stripVerbPrefix(text, verb string) (string, bool) {
+	if len(text) < len(verb) {
+		return "", false
+	}
+	if !strings.EqualFold(text[:len(verb)], verb) {
+		return "", false
+	}
+	if len(text) == len(verb) {
+		return "", true
+	}
+	if text[len(verb)] != ' ' && text[len(verb)] != '\t' {
+		return "", false
+	}
+	return strings.TrimSpace(text[len(verb)+1:]), true
 }
 
 // refToArgs splits "name" or "name@version" into the args map shape used by

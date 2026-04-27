@@ -19,8 +19,9 @@ MVP scaffold. Working today:
 - ✅ MCP server (`shipd mcp serve`) — exposes 6 tools to any MCP client
 - ✅ Message gateway: stdio REPL + Feishu adapter (`shipd gateway serve`)
 - ✅ Install pages with QR codes + iOS plist (`/install/{app}/{version}`)
+- ✅ AI release notes (`shipd publish --ai-notes`)
+- ✅ Free-form `ask` verb on the gateway (LLM picks tools to answer)
 - 🚧 Message gateway: WeChat-Work / Slack / Telegram adapters (planned)
-- 🚧 AI release-notes generation (planned)
 - 🚧 S3 / R2 / OSS blob backends (planned)
 
 ## Quick start
@@ -53,6 +54,10 @@ export SHIPD_TOKEN=<the token printed above>
 
 # pull a release
 ./shipd yank mybuild@1.0.0 --reason "crash on iOS 18"
+
+# generate release notes from git log via Claude
+export ANTHROPIC_API_KEY=sk-ant-...
+./shipd publish ./mybuild.ipa --version 1.1.0 --ai-notes
 ```
 
 ## Install pages
@@ -144,6 +149,7 @@ Chat verbs (same as the stdio REPL):
 | `info <app>[@<version>]` | release metadata, latest by default |
 | `url <app>[@<version>]` | direct download URL |
 | `yank <app>@<version> [reason="..."]` | withdraw a release |
+| `ask <question...>` | free-form question; an LLM picks tools to answer (requires `$ANTHROPIC_API_KEY` on the gateway server) |
 | `help` | show this list |
 
 ## Why another distribution platform?
@@ -181,10 +187,11 @@ as a first-class user. `shipd`'s differentiation is:
 cmd/shipd/         entry point
 internal/cli/      cobra subcommands (CLI surface)
 internal/client/   tiny Go SDK used by the CLI
-internal/server/   HTTP server + handlers + auth middleware
+internal/server/   HTTP server + handlers + auth middleware + install pages
 internal/storage/  SQLite metadata + blob filesystem
 internal/mcp/      JSON-RPC stdio MCP server + tool registry + shipd tools
 internal/gateway/  chat-message router + stdio + Feishu adapters
+internal/ai/       Anthropic API client, release-notes generator, tool-use agent
 internal/pkginfo/  artifact platform detection + app-name inference
 docs/              design notes
 ```

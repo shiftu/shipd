@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/shiftu/shipd/internal/ai"
 	"github.com/shiftu/shipd/internal/gateway"
 	"github.com/shiftu/shipd/internal/mcp"
 	"github.com/spf13/cobra"
@@ -31,6 +32,17 @@ func newGatewayCmd() *cobra.Command {
 			mcp.RegisterShipdTools(reg, c, c.BaseURL)
 			router := gateway.NewRouter(reg)
 
+			// Enable the chat-mode "ask" verb when an Anthropic API key is
+			// available. Without one the gateway still works for the
+			// structured verbs (list, info, ...) — `ask` just replies with
+			// a clear "not enabled" message.
+			if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+				model, _ := cmd.Flags().GetString("ai-model")
+				agent := ai.NewAgent(ai.NewClient(ai.Config{APIKey: apiKey, Model: model}), reg, log.Default())
+				router.WithAgent(agent)
+				log.Default().Printf("ask verb enabled (model=%s)", firstNonEmpty(model, "claude-sonnet-4-6"))
+			}
+
 			ctx, cancel := signalContext()
 			defer cancel()
 
@@ -47,6 +59,7 @@ func newGatewayCmd() *cobra.Command {
 	serve.Flags().String("feishu-app-id", os.Getenv("FEISHU_APP_ID"), "Feishu app ID (or $FEISHU_APP_ID)")
 	serve.Flags().String("feishu-app-secret", os.Getenv("FEISHU_APP_SECRET"), "Feishu app secret (or $FEISHU_APP_SECRET)")
 	serve.Flags().String("feishu-verification-token", os.Getenv("FEISHU_VERIFICATION_TOKEN"), "Feishu event verification token (or $FEISHU_VERIFICATION_TOKEN)")
+	serve.Flags().String("ai-model", "", "Claude model for the 'ask' verb (default: claude-sonnet-4-6, requires $ANTHROPIC_API_KEY)")
 
 	cmd.AddCommand(serve)
 	return cmd
@@ -77,4 +90,13 @@ func buildAdapter(name string, cmd *cobra.Command) (gateway.Adapter, error) {
 	default:
 		return nil, errors.New("unknown adapter " + name)
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

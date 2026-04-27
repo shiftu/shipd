@@ -127,13 +127,28 @@ Notes:
 - Optional LLM mode: free-form `@bot ask "..."` runs through an Agent with
   shipd's MCP tools available
 
-### v0.6 — AI hooks
-- `--ai-notes`: pull `git log` since the last release, generate structured
-  release notes with Claude
-- Crash clustering: if a `crash report` API is added, embed stacktraces and
-  cluster
+### Done (v0.5 — AI hooks)
+- `shipd publish --ai-notes`: pulls `git log <prev-version-tag>..HEAD`,
+  sends to Claude with a cacheable system prompt, fills in the release
+  notes. `--ai-since` overrides the auto-detected previous version.
+- Free-form `ask <text>` verb on the gateway: the message is handed to a
+  tool-use agent that has the same six tools the MCP server exposes.
+  When `ANTHROPIC_API_KEY` is unset on the gateway server, `ask` replies
+  with a clear "not enabled" message instead of hanging.
+- Hand-rolled Anthropic /v1/messages client (no Go SDK dependency); ~150
+  LOC, supports prompt caching and tool-use blocks. Default model is
+  Sonnet 4.6; configurable via `--ai-model`.
+- Bounded loop: agent caps at 8 tool-use iterations per Ask call to
+  defend against runaway models, and 1024 output tokens per call to keep
+  chat replies short.
+
+### v0.6 — More AI
+- Crash clustering: if a `crash report` API is added, embed stacktraces
+  and cluster.
 - Natural-language query: "which version had the highest crash rate last
-  week?" → SQL/aggregate
+  week?" → tool-use agent with a SQL aggregation tool.
+- Stream tool-use loops back into the chat as live updates so a user
+  sees "calling shipd_list_releases..." during long ask sessions.
 
 ### v0.7 — Cloud storage
 - S3 / R2 / OSS / GCS blob backends via gocloud.dev/blob

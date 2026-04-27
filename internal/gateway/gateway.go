@@ -48,10 +48,25 @@ type DispatchFn func(ctx context.Context, msg Message) Reply
 
 // Router holds the shared tool registry and turns Messages into Replies.
 type Router struct {
-	reg *mcp.Registry
+	reg   *mcp.Registry
+	agent Asker // optional; nil disables the "ask" verb
+}
+
+// Asker is the surface the gateway needs from an LLM agent — small enough
+// that ai.Agent can implement it without the gateway depending on internal/ai
+// at build time.
+type Asker interface {
+	Ask(ctx context.Context, prompt string) (string, error)
 }
 
 func NewRouter(reg *mcp.Registry) *Router { return &Router{reg: reg} }
+
+// WithAgent enables the "ask" chat verb. Pass an Asker (typically *ai.Agent)
+// that has access to the same MCP registry the router uses.
+func (r *Router) WithAgent(a Asker) *Router {
+	r.agent = a
+	return r
+}
 
 // Dispatch parses msg.Text, looks up the tool, calls it, and formats the result.
 func (r *Router) Dispatch(ctx context.Context, msg Message) Reply {
@@ -61,6 +76,16 @@ func (r *Router) Dispatch(ctx context.Context, msg Message) Reply {
 	}
 	if cmd.Help {
 		return Reply{Text: r.helpText()}
+	}
+	if cmd.Ask != "" {
+		if r.agent == nil {
+			return Reply{Text: "ask is not enabled (no ANTHROPIC_API_KEY configured on the server)", IsError: true}
+		}
+		answer, err := r.agent.Ask(ctx, cmd.Ask)
+		if err != nil {
+			return Reply{Text: "error: " + err.Error(), IsError: true}
+		}
+		return Reply{Text: answer}
 	}
 	tool, ok := r.reg.Get(cmd.Tool)
 	if !ok {
