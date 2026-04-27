@@ -17,7 +17,7 @@ MVP scaffold. Working today:
 - ✅ API token auth (write tokens vs. public reads)
 - ✅ SHA-256 verification on download
 - ✅ MCP server (`shipd mcp serve`) — exposes 6 tools to any MCP client
-- ✅ Message gateway: stdio + Feishu + WeChat-Work adapters (`shipd gateway serve`)
+- ✅ Message gateway: stdio + Feishu + WeChat-Work + WeChat-personal (iLink) adapters
 - ✅ Install pages with QR codes + iOS plist (`/install/{app}/{version}`)
 - ✅ AI release notes (`shipd publish --ai-notes`)
 - ✅ Free-form `ask` verb on the gateway (LLM picks tools to answer)
@@ -140,6 +140,36 @@ Then in the Feishu Open Platform:
 3. Add the bot to a group; chat with it: `@bot list`, `@bot info myapp`,
    `@bot yank myapp@1.0.0 reason="crash"`
 
+### WeChat (personal account) via iLink
+
+> ⚠️ **iLink is reverse-engineered.** This adapter targets Tencent's iLink
+> bot endpoint (`ilinkai.weixin.qq.com`), the same protocol Hermes Agent
+> uses. It is not an officially documented public API and may stop working
+> without notice. Operating personal-account bots may also conflict with
+> WeChat's terms of service in some jurisdictions — only use this adapter
+> with explicit user consent.
+
+```bash
+# 1. Interactive QR login (one time per account).
+#    Prints a URL and an ASCII QR; scan with WeChat to authorize.
+shipd gateway weixin-login --state-dir ./data/weixin
+
+# saved ./data/weixin/<account_id>.json — start the gateway with --weixin-account-id <account_id>
+
+# 2. Run the adapter.
+shipd gateway serve --adapter weixin \
+  --weixin-account-id <account_id> \
+  --weixin-state-dir   ./data/weixin
+```
+
+Behavior:
+- Long-polls iLink's `getupdates` (35-second windows) for new messages
+- Per-peer `context_token` is tracked in memory and echoed on replies
+- Long-poll cursor (`get_updates_buf`) is persisted so restarts don't replay
+- Session expiry (errcode `-14`) → 10-minute pause and re-poll; if it persists,
+  re-run `weixin-login` to refresh the bot token
+- Text only in v1; image/voice/video/file inbound are silently dropped
+
 ### WeChat Work / 企业微信 (扫码接入)
 
 ```bash
@@ -214,7 +244,7 @@ internal/client/   tiny Go SDK used by the CLI
 internal/server/   HTTP server + handlers + auth middleware + install pages
 internal/storage/  SQLite metadata + blob filesystem
 internal/mcp/      JSON-RPC stdio MCP server + tool registry + shipd tools
-internal/gateway/  chat-message router + stdio + Feishu + WeChat-Work adapters
+internal/gateway/  chat-message router + stdio + Feishu + WeChat-Work + Weixin adapters
 internal/ai/       Anthropic API client, release-notes generator, tool-use agent
 internal/pkginfo/  artifact platform detection + app-name inference
 docs/              design notes

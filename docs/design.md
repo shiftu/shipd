@@ -142,6 +142,24 @@ Notes:
   defend against runaway models, and 1024 output tokens per call to keep
   chat replies short.
 
+### Done (v0.7 — WeChat personal-account adapter via iLink)
+- `shipd gateway weixin-login` runs an interactive QR login (ASCII QR
+  rendered in the terminal) against Tencent's iLink endpoint and persists
+  the resulting `bot_token` to `<state-dir>/<account_id>.json` (mode 0600)
+- `shipd gateway serve --adapter weixin` long-polls `getupdates` for 35s
+  windows, dispatches text messages through the same Router/Asker the
+  other adapters use, and replies via `sendmessage` echoing the per-peer
+  `context_token` Tencent requires after the first turn
+- Long-poll cursor (`get_updates_buf`) is persisted so a restart resumes
+  from the previous boundary instead of replaying messages
+- Session expiry (errcode `-14`) triggers a 10-minute pause; the operator
+  re-runs `weixin-login` to refresh the bot token
+- Crypto-light v1: text only. Image/voice/video/file inbound are silently
+  dropped — wiring them in requires CDN AES-128-ECB decrypt + media
+  upload flow that's a separate slice
+- Reverse-engineered protocol: documented prominently in the help text
+  and the README that this is best-effort and not guaranteed ToS-compliant
+
 ### Done (v0.6 — WeChat Work adapter)
 - `shipd gateway serve --adapter wechat-work` shipped
 - Implements the full WeChat Work app callback contract: SHA1 msg_signature

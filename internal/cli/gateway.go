@@ -55,7 +55,7 @@ func newGatewayCmd() *cobra.Command {
 			return a.Run(ctx, router.Dispatch)
 		},
 	}
-	serve.Flags().StringVar(&adapter, "adapter", "stdio", "adapter: stdio | feishu | wechat-work")
+	serve.Flags().StringVar(&adapter, "adapter", "stdio", "adapter: stdio | feishu | wechat-work | weixin")
 	serve.Flags().String("addr", ":8081", "listen address (HTTP adapters only)")
 	serve.Flags().String("public-base-url", os.Getenv("SHIPD_GATEWAY_PUBLIC_BASE_URL"), "public URL prefix for onboarding pages (default: derived from request)")
 	serve.Flags().String("feishu-app-id", os.Getenv("FEISHU_APP_ID"), "Feishu app ID (or $FEISHU_APP_ID)")
@@ -66,9 +66,14 @@ func newGatewayCmd() *cobra.Command {
 	serve.Flags().String("wxwork-secret", os.Getenv("WXWORK_SECRET"), "WeChat Work app secret (or $WXWORK_SECRET)")
 	serve.Flags().String("wxwork-token", os.Getenv("WXWORK_TOKEN"), "WeChat Work callback verification token (or $WXWORK_TOKEN)")
 	serve.Flags().String("wxwork-aes-key", os.Getenv("WXWORK_ENCODING_AES_KEY"), "WeChat Work 43-char EncodingAESKey (or $WXWORK_ENCODING_AES_KEY)")
+	serve.Flags().String("weixin-account-id", os.Getenv("WEIXIN_ACCOUNT_ID"), "Weixin (iLink) account_id from a prior weixin-login (or $WEIXIN_ACCOUNT_ID)")
+	serve.Flags().String("weixin-token", os.Getenv("WEIXIN_TOKEN"), "Weixin bot token override (default: read from --weixin-state-dir)")
+	serve.Flags().String("weixin-base-url", os.Getenv("WEIXIN_BASE_URL"), "Weixin iLink base URL override")
+	serve.Flags().String("weixin-state-dir", defaultWeixinStateDir(), "directory for Weixin credentials and sync_buf")
 	serve.Flags().String("ai-model", "", "Claude model for the 'ask' verb (default: claude-sonnet-4-6, requires $ANTHROPIC_API_KEY)")
 
 	cmd.AddCommand(serve)
+	cmd.AddCommand(newWeixinLoginCmd())
 	return cmd
 }
 
@@ -94,6 +99,8 @@ func buildAdapter(name string, cmd *cobra.Command) (gateway.Adapter, error) {
 			AppSecret:         appSecret,
 			VerificationToken: vtok,
 		}, log.Default()), nil
+	case "weixin":
+		return loadWeixinAdapter(cmd)
 	case "wechat-work":
 		addr, _ := cmd.Flags().GetString("addr")
 		publicBase, _ := cmd.Flags().GetString("public-base-url")
