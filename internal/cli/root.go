@@ -31,6 +31,7 @@ func NewRoot(version string) *cobra.Command {
 		newDownloadCmd(),
 		newYankCmd(),
 		newTokenCmd(),
+		newMCPCmd(),
 	)
 	return root
 }

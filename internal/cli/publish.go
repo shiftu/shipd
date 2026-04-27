@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/shiftu/shipd/internal/client"
 	"github.com/shiftu/shipd/internal/pkginfo"
@@ -43,7 +42,7 @@ func newPublishCmd() *cobra.Command {
 			// Smart defaults: derive app name and platform from filename if not given.
 			base := filepath.Base(path)
 			if appName == "" {
-				appName = inferAppName(base)
+				appName = pkginfo.InferAppName(base)
 			}
 			if platform == "" {
 				platform = string(pkginfo.Detect(path))
@@ -80,33 +79,3 @@ func newPublishCmd() *cobra.Command {
 	return cmd
 }
 
-// inferAppName drops the extension and any trailing -version-like suffix.
-func inferAppName(filename string) string {
-	name := strings.TrimSuffix(filename, filepath.Ext(filename))
-	// Trim a trailing "-vX.Y.Z" or "-X.Y.Z" suffix when present.
-	if i := strings.LastIndex(name, "-"); i > 0 {
-		tail := name[i+1:]
-		if looksLikeVersion(tail) {
-			name = name[:i]
-		}
-	}
-	return name
-}
-
-func looksLikeVersion(s string) bool {
-	s = strings.TrimPrefix(s, "v")
-	if s == "" {
-		return false
-	}
-	dots := 0
-	for _, r := range s {
-		switch {
-		case r >= '0' && r <= '9':
-		case r == '.':
-			dots++
-		default:
-			return false
-		}
-	}
-	return dots >= 1
-}

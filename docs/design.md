@@ -83,21 +83,22 @@ Notes:
 
 ## Roadmap
 
-### Done (v0.1, this commit)
+### Done (v0.1)
 - Server + storage + CLI for the full publish/list/info/download/yank cycle
 - API token auth, SHA-256 download verification
 
-### v0.2 — Install pages
+### Done (v0.2 → bumped: MCP shipped before install pages)
+- `shipd mcp serve` exposes shipd verbs as MCP tools over stdio JSON-RPC
+- Tools: `shipd_list_apps`, `shipd_list_releases`, `shipd_get_release`,
+  `shipd_yank_release`, `shipd_publish`, `shipd_download_url`
+- Hand-rolled JSON-RPC dispatcher (no external MCP dep), spec-compliant
+  enough for Claude Desktop / Cursor
+
+### v0.3 — Install pages
 - `/install/{app}` HTML page with QR code and platform-specific install link
   (`itms-services://...` for iOS plist, direct APK for Android)
 - Plist generator for iOS enterprise / ad-hoc distribution
 - Optional download tokens: short-lived URL-signed downloads for sharing
-
-### v0.3 — MCP server
-- `shipd mcp serve` exposes every CLI verb as an MCP tool
-- Tools: `publish`, `list_apps`, `list_releases`, `get_release`, `latest`,
-  `download` (returns a signed URL), `yank`
-- A Claude Code / Cursor user can wire shipd into their agent loop
 
 ### v0.4 — Message gateway
 - `shipd gateway serve` with adapter plugins

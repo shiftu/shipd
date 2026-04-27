@@ -16,7 +16,7 @@ MVP scaffold. Working today:
 - ✅ CLI: `publish`, `list`, `info`, `download`, `yank`, `token`
 - ✅ API token auth (write tokens vs. public reads)
 - ✅ SHA-256 verification on download
-- 🚧 MCP server (planned)
+- ✅ MCP server (`shipd mcp serve`) — exposes 6 tools to any MCP client
 - 🚧 Message gateway: Feishu / WeChat-Work / Slack adapters (planned)
 - 🚧 AI release-notes generation (planned)
 - 🚧 Install pages with QR codes (planned)
@@ -53,6 +53,34 @@ export SHIPD_TOKEN=<the token printed above>
 ./shipd yank mybuild@1.0.0 --reason "crash on iOS 18"
 ```
 
+## Using shipd from an Agent (MCP)
+
+`shipd mcp serve` runs an [MCP](https://modelcontextprotocol.io) server on
+stdio. Wire it into Claude Desktop, Cursor, or any MCP-compatible host:
+
+```json
+{
+  "mcpServers": {
+    "shipd": {
+      "command": "/usr/local/bin/shipd",
+      "args": ["mcp", "serve", "--server", "https://shipd.example.com"],
+      "env": { "SHIPD_TOKEN": "shipd_..." }
+    }
+  }
+}
+```
+
+The agent then sees these tools:
+
+| Tool | Purpose |
+|---|---|
+| `shipd_list_apps` | enumerate apps |
+| `shipd_list_releases` | releases for one app, newest first |
+| `shipd_get_release` | release metadata (latest if no version) |
+| `shipd_publish` | upload a local file as a new release |
+| `shipd_download_url` | direct download URL for a release |
+| `shipd_yank_release` | mark a release as withdrawn |
+
 ## Why another distribution platform?
 
 The existing self-hosted options (app-space, zealot, fir.im, significa) were
@@ -62,7 +90,7 @@ as a first-class user. `shipd`'s differentiation is:
 | | app-space | zealot | significa | **shipd** |
 |---|---|---|---|---|
 | CLI is a first-class interface | ❌ | fastlane plugin | ❌ | ✅ |
-| MCP server | ❌ | ❌ | ❌ | 🚧 |
+| MCP server | ❌ | ❌ | ❌ | ✅ |
 | Message gateway (Feishu/WeChat/Slack) | ❌ | ❌ | ❌ | 🚧 |
 | AI-generated release notes | ❌ | ❌ | ❌ | 🚧 |
 | Single binary deployment | ❌ | ❌ | ✅ | ✅ |
@@ -90,7 +118,8 @@ internal/cli/      cobra subcommands (CLI surface)
 internal/client/   tiny Go SDK used by the CLI
 internal/server/   HTTP server + handlers + auth middleware
 internal/storage/  SQLite metadata + blob filesystem
-internal/pkginfo/  artifact platform detection (.ipa/.apk/...)
+internal/mcp/      JSON-RPC stdio MCP server + shipd tools
+internal/pkginfo/  artifact platform detection + app-name inference
 docs/              design notes
 ```
 
