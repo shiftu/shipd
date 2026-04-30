@@ -204,15 +204,24 @@ func (f *FeishuAdapter) handleMessage(ctx context.Context, dispatch DispatchFn, 
 	}
 	text = stripFeishuMentions(text)
 
+	chatID := ev.Message.ChatID
+	stream := func(line string) {
+		if line == "" {
+			return
+		}
+		if err := f.sendText(ctx, chatID, line); err != nil {
+			f.log.Printf("feishu: stream send failed: %v", err)
+		}
+	}
 	reply := dispatch(ctx, Message{
 		Text:   text,
-		ChatID: ev.Message.ChatID,
+		ChatID: chatID,
 		UserID: ev.Sender.SenderID.OpenID,
-	})
+	}, stream)
 	if reply.Text == "" {
 		return
 	}
-	if err := f.sendText(ctx, ev.Message.ChatID, reply.Text); err != nil {
+	if err := f.sendText(ctx, chatID, reply.Text); err != nil {
 		f.log.Printf("feishu: send failed: %v", err)
 	}
 }

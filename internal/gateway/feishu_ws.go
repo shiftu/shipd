@@ -78,7 +78,15 @@ func (f *FeishuAdapter) onWSMessage(ctx context.Context, dispatch DispatchFn, se
 		userID = derefStr(ev.Event.Sender.SenderId.OpenId)
 	}
 
-	reply := dispatch(ctx, Message{Text: text, ChatID: chatID, UserID: userID})
+	stream := func(line string) {
+		if line == "" {
+			return
+		}
+		if err := f.sendWS(ctx, send, chatID, line); err != nil {
+			f.log.Printf("feishu ws: stream send failed: %v", err)
+		}
+	}
+	reply := dispatch(ctx, Message{Text: text, ChatID: chatID, UserID: userID}, stream)
 	if reply.Text == "" {
 		return
 	}

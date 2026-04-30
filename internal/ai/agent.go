@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/shiftu/shipd/internal/mcp"
 )
@@ -62,7 +63,13 @@ func NewAgent(client *Client, reg *mcp.Registry, logger *log.Logger) *Agent {
 //  3. If the response is tool_use, execute every tool_use block, append a
 //     user-role message with the tool_result blocks, and call again.
 //  4. Bail with maxIterations to keep a misbehaving model from spending forever.
-func (a *Agent) Ask(ctx context.Context, prompt string) (string, error) {
+//
+// onProgress, when non-nil, is called per intermediate iteration with the
+// model's interleaved text and a "📡 calling <tool>" line per tool_use
+// block, so chat users see the agent's reasoning unfold rather than waiting
+// 10–30 seconds in silence. The final answer is the return value, never
+// streamed through onProgress, so callers don't have to dedupe.
+func (a *Agent) Ask(ctx context.Context, prompt string, onProgress func(text string)) (string, error) {
 	tools := a.toolsForAnthropic()
 
 	messages := []Message{{
@@ -97,6 +104,14 @@ func (a *Agent) Ask(ctx context.Context, prompt string) (string, error) {
 			return text, nil
 		}
 
+		// Intermediate iteration: stream the model's reasoning + the tool
+		// calls it's about to make, so the chat user sees progress instead
+		// of staring at a frozen prompt. Final-iteration text is reserved
+		// for the return value to avoid duplication.
+		if onProgress != nil {
+			streamProgress(resp.Content, onProgress)
+		}
+
 		// Append the assistant turn verbatim — tool_use blocks must be paired
 		// with their tool_result blocks in the next user turn.
 		messages = append(messages, Message{Role: "assistant", Content: resp.Content})
@@ -105,6 +120,23 @@ func (a *Agent) Ask(ctx context.Context, prompt string) (string, error) {
 		messages = append(messages, Message{Role: "user", Content: results})
 	}
 	return "", fmt.Errorf("agent: hit max iterations (%d) without end_turn", a.maxIterations)
+}
+
+// streamProgress emits one onProgress line per text block (the model's
+// own commentary) and one per tool_use block ("📡 calling shipd_X"). It
+// keeps the call simple — no args truncation, no result echoing — because
+// chat clients prefer short discrete messages over long composed ones.
+func streamProgress(blocks []ContentBlock, onProgress func(string)) {
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if t := strings.TrimSpace(b.Text); t != "" {
+				onProgress(t)
+			}
+		case "tool_use":
+			onProgress("📡 calling " + b.Name)
+		}
+	}
 }
 
 // runToolCalls executes every tool_use block and returns one tool_result

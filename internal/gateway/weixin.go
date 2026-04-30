@@ -209,16 +209,25 @@ func (a *WeixinAdapter) handleInbound(ctx context.Context, dispatch DispatchFn, 
 	if msg.RoomID != "" {
 		chatID = msg.RoomID
 	}
+	to := msg.FromUserID
+	stream := func(line string) {
+		if line == "" {
+			return
+		}
+		if err := a.sendText(ctx, to, line); err != nil {
+			a.log.Printf("weixin: stream send failed to=%s: %v", shortID(to), err)
+		}
+	}
 	reply := dispatch(ctx, Message{
 		Text:   text,
 		ChatID: chatID,
-		UserID: msg.FromUserID,
-	})
+		UserID: to,
+	}, stream)
 	if reply.Text == "" {
 		return
 	}
-	if err := a.sendText(ctx, msg.FromUserID, reply.Text); err != nil {
-		a.log.Printf("weixin: send failed to=%s: %v", shortID(msg.FromUserID), err)
+	if err := a.sendText(ctx, to, reply.Text); err != nil {
+		a.log.Printf("weixin: send failed to=%s: %v", shortID(to), err)
 	}
 }
 

@@ -88,7 +88,7 @@ func TestAgentToolUseLoop(t *testing.T) {
 
 	client := NewClient(Config{APIKey: "test-key", BaseURL: srv.URL})
 	agent := NewAgent(client, reg, nil)
-	got, err := agent.Ask(context.Background(), "list apps")
+	got, err := agent.Ask(context.Background(), "list apps", nil)
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -118,9 +118,106 @@ func TestAgentMaxIterations(t *testing.T) {
 	defer srv.Close()
 
 	agent := NewAgent(NewClient(Config{APIKey: "k", BaseURL: srv.URL}), reg, nil)
-	_, err := agent.Ask(context.Background(), "loop forever")
+	_, err := agent.Ask(context.Background(), "loop forever", nil)
 	if err == nil || !strings.Contains(err.Error(), "max iterations") {
 		t.Fatalf("expected max-iterations error, got %v", err)
+	}
+}
+
+// TestAgentStreamsProgress: when onProgress is non-nil, intermediate
+// turns push the model's interleaved text and a "📡 calling X" line per
+// tool_use block. The final-turn text is reserved for the return value
+// (no duplication into the stream).
+func TestAgentStreamsProgress(t *testing.T) {
+	tool := &fakeTool{name: "shipd_list_apps", description: "list apps", reply: `[{"name":"foo"}]`}
+	reg := mcp.NewRegistry()
+	reg.Register(tool)
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if turn == 0 {
+			writeJSON(w, MessageResp{
+				StopReason: "tool_use",
+				Content: []ContentBlock{
+					{Type: "text", Text: "Let me look up the apps first."},
+					{Type: "tool_use", ID: "toolu_1", Name: "shipd_list_apps", Input: json.RawMessage(`{}`)},
+				},
+			})
+			turn++
+			return
+		}
+		writeJSON(w, MessageResp{
+			StopReason: "end_turn",
+			Content:    []ContentBlock{{Type: "text", Text: "Final answer: one app, foo."}},
+		})
+	}))
+	defer srv.Close()
+
+	agent := NewAgent(NewClient(Config{APIKey: "k", BaseURL: srv.URL}), reg, nil)
+
+	var streamed []string
+	final, err := agent.Ask(context.Background(), "what apps?", func(line string) {
+		streamed = append(streamed, line)
+	})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if final != "Final answer: one app, foo." {
+		t.Errorf("final answer = %q", final)
+	}
+	wantProgress := []string{
+		"Let me look up the apps first.",
+		"📡 calling shipd_list_apps",
+	}
+	if len(streamed) != len(wantProgress) {
+		t.Fatalf("progress lines = %d, want %d (%v)", len(streamed), len(wantProgress), streamed)
+	}
+	for i, w := range wantProgress {
+		if streamed[i] != w {
+			t.Errorf("progress[%d] = %q, want %q", i, streamed[i], w)
+		}
+	}
+	// Final-iteration text must NOT appear in the stream — that would
+	// double-render in chat.
+	for _, line := range streamed {
+		if strings.Contains(line, "Final answer") {
+			t.Errorf("final text leaked into stream: %q", line)
+		}
+	}
+}
+
+// TestAgentNilProgressKeepsLegacyBehavior: passing nil for onProgress
+// must run exactly the way the pre-streaming agent did — single-shot
+// final answer, no intermediate emissions.
+func TestAgentNilProgressKeepsLegacyBehavior(t *testing.T) {
+	tool := &fakeTool{name: "shipd_list_apps", description: "x", reply: "{}"}
+	reg := mcp.NewRegistry()
+	reg.Register(tool)
+
+	turn := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if turn == 0 {
+			writeJSON(w, MessageResp{
+				StopReason: "tool_use",
+				Content: []ContentBlock{
+					{Type: "text", Text: "thinking..."},
+					{Type: "tool_use", ID: "t1", Name: "shipd_list_apps", Input: json.RawMessage(`{}`)},
+				},
+			})
+			turn++
+			return
+		}
+		writeJSON(w, MessageResp{StopReason: "end_turn", Content: []ContentBlock{{Type: "text", Text: "done"}}})
+	}))
+	defer srv.Close()
+
+	agent := NewAgent(NewClient(Config{APIKey: "k", BaseURL: srv.URL}), reg, nil)
+	got, err := agent.Ask(context.Background(), "hi", nil)
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if got != "done" {
+		t.Errorf("got %q, want done", got)
 	}
 }
 

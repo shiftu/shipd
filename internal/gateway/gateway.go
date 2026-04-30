@@ -37,14 +37,23 @@ type Reply struct {
 //
 // Run blocks until ctx is cancelled or the underlying transport closes. The
 // adapter calls dispatch for each incoming message; dispatch returns the
-// Reply to send back.
+// final Reply, and may also push intermediate progress lines through the
+// stream callback during long-running tool-use loops (the `ask` verb).
 type Adapter interface {
 	Name() string
 	Run(ctx context.Context, dispatch DispatchFn) error
 }
 
 // DispatchFn is the function adapters call when they receive a message.
-type DispatchFn func(ctx context.Context, msg Message) Reply
+//
+// stream is invoked with intermediate progress lines (e.g. "📡 calling
+// shipd_list_apps") that the agent emits between tool-use iterations of
+// the `ask` verb. Adapters wire it to whatever lets them post a
+// stand-alone message in their native channel — Feishu's IM REST,
+// WeChat Work's send-message API, fmt.Fprintln for stdio. Adapters that
+// don't want progress can pass nil; the agent then runs in single-shot
+// mode and only the final Reply is delivered.
+type DispatchFn func(ctx context.Context, msg Message, stream func(text string)) Reply
 
 // Router holds the shared tool registry and turns Messages into Replies.
 type Router struct {
@@ -55,8 +64,13 @@ type Router struct {
 // Asker is the surface the gateway needs from an LLM agent — small enough
 // that ai.Agent can implement it without the gateway depending on internal/ai
 // at build time.
+//
+// onProgress, when non-nil, is invoked with intermediate progress lines as
+// the agent's tool-use loop iterates. The final answer is the return value.
+// Implementations that don't support streaming must still accept the
+// callback and may simply ignore it.
 type Asker interface {
-	Ask(ctx context.Context, prompt string) (string, error)
+	Ask(ctx context.Context, prompt string, onProgress func(text string)) (string, error)
 }
 
 func NewRouter(reg *mcp.Registry) *Router { return &Router{reg: reg} }
@@ -68,8 +82,10 @@ func (r *Router) WithAgent(a Asker) *Router {
 	return r
 }
 
-// Dispatch parses msg.Text, looks up the tool, calls it, and formats the result.
-func (r *Router) Dispatch(ctx context.Context, msg Message) Reply {
+// Dispatch parses msg.Text, looks up the tool, calls it, and formats the
+// result. stream may be nil; when non-nil, intermediate progress lines (from
+// the `ask` verb's tool-use loop) flow through it before the final Reply.
+func (r *Router) Dispatch(ctx context.Context, msg Message, stream func(text string)) Reply {
 	cmd, err := parseCommand(msg.Text)
 	if err != nil {
 		return Reply{Text: "error: " + err.Error(), IsError: true}
@@ -81,7 +97,7 @@ func (r *Router) Dispatch(ctx context.Context, msg Message) Reply {
 		if r.agent == nil {
 			return Reply{Text: "ask is not enabled (no ANTHROPIC_API_KEY configured on the server)", IsError: true}
 		}
-		answer, err := r.agent.Ask(ctx, cmd.Ask)
+		answer, err := r.agent.Ask(ctx, cmd.Ask, stream)
 		if err != nil {
 			return Reply{Text: "error: " + err.Error(), IsError: true}
 		}

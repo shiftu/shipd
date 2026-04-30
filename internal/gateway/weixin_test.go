@@ -200,7 +200,7 @@ func TestAdapterContextTokenEcho(t *testing.T) {
 		"context_token": "ctx-xyz",
 		"item_list":     []map[string]any{{"type": wxItemText, "text_item": map[string]any{"text": "ping"}}},
 	})
-	a.handleInbound(context.Background(), func(_ context.Context, _ Message) Reply {
+	a.handleInbound(context.Background(), func(_ context.Context, _ Message, _ func(string)) Reply {
 		return Reply{Text: "pong"}
 	}, raw)
 

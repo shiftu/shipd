@@ -30,7 +30,12 @@ func (a *StdioAdapter) Run(ctx context.Context, dispatch DispatchFn) error {
 		}
 		line, err := br.ReadString('\n')
 		if line != "" {
-			reply := dispatch(ctx, Message{Text: line, ChatID: "stdio", UserID: "local"})
+			// Stream callback prints each progress line on its own row;
+			// the final Reply.Text is appended after the loop returns.
+			stream := func(text string) {
+				_, _ = fmt.Fprintln(a.Out, text)
+			}
+			reply := dispatch(ctx, Message{Text: line, ChatID: "stdio", UserID: "local"}, stream)
 			_, _ = fmt.Fprintln(a.Out, reply.Text)
 		}
 		if err != nil {

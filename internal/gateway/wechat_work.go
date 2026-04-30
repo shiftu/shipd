@@ -183,15 +183,24 @@ func (a *WechatWorkAdapter) handleMessage(ctx context.Context, dispatch Dispatch
 		return
 	}
 
+	to := msg.FromUserName
+	stream := func(line string) {
+		if line == "" {
+			return
+		}
+		if err := a.sendText(ctx, to, line); err != nil {
+			a.log.Printf("wxwork: stream send failed: %v", err)
+		}
+	}
 	reply := dispatch(ctx, Message{
 		Text:   msg.Content,
-		ChatID: msg.FromUserName, // direct messages: chat id == user id
-		UserID: msg.FromUserName,
-	})
+		ChatID: to, // direct messages: chat id == user id
+		UserID: to,
+	}, stream)
 	if reply.Text == "" {
 		return
 	}
-	if err := a.sendText(ctx, msg.FromUserName, reply.Text); err != nil {
+	if err := a.sendText(ctx, to, reply.Text); err != nil {
 		a.log.Printf("wxwork: send failed: %v", err)
 	}
 }
