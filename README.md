@@ -173,6 +173,31 @@ Set the event subscription URL to `https://your-host:8081/feishu/event` and
 subscribe to `im.message.receive_v1`. Encrypted payloads are not supported
 in this build.
 
+### Slack (Socket Mode)
+
+```bash
+shipd gateway serve --adapter slack \
+  --slack-app-token $SLACK_APP_TOKEN \
+  --slack-bot-token $SLACK_BOT_TOKEN
+```
+
+Like Feishu's default WS mode, Socket Mode dials Slack over outbound HTTPS
+and holds a long connection — no public webhook URL required. Auto-reconnect
+is handled by the slack-go SDK.
+
+In the Slack [App config](https://api.slack.com/apps) for your bot:
+
+1. **Basic Information → App-Level Tokens**: create a token with the
+   `connections:write` scope. This is the `xapp-...` value for `--slack-app-token`.
+2. **Socket Mode**: enable.
+3. **OAuth & Permissions → Bot Token Scopes**: add `app_mentions:read`,
+   `chat:write`, `im:history`, `im:read`. Install the app to your workspace;
+   the resulting Bot User OAuth Token (`xoxb-...`) is `--slack-bot-token`.
+4. **Event Subscriptions → Subscribe to bot events**: `app_mention`,
+   `message.im`. (No request URL — Socket Mode replaces it.)
+
+Then `@shipd-bot list` in any channel the bot is in, or DM the bot directly.
+
 ### WeChat (personal account) via iLink
 
 > ⚠️ **iLink is reverse-engineered.** This adapter targets Tencent's iLink

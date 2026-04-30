@@ -55,7 +55,7 @@ func newGatewayCmd() *cobra.Command {
 			return a.Run(ctx, router.Dispatch)
 		},
 	}
-	serve.Flags().StringVar(&adapter, "adapter", "stdio", "adapter: stdio | feishu | wechat-work | weixin")
+	serve.Flags().StringVar(&adapter, "adapter", "stdio", "adapter: stdio | feishu | wechat-work | weixin | slack")
 	serve.Flags().String("addr", ":8081", "listen address (HTTP adapters only)")
 	serve.Flags().String("public-base-url", os.Getenv("SHIPD_GATEWAY_PUBLIC_BASE_URL"), "public URL prefix for onboarding pages (default: derived from request)")
 	serve.Flags().String("feishu-mode", firstNonEmpty(os.Getenv("FEISHU_MODE"), "websocket"), "Feishu transport: websocket (default, no public URL needed) | webhook")
@@ -67,6 +67,8 @@ func newGatewayCmd() *cobra.Command {
 	serve.Flags().String("wxwork-secret", os.Getenv("WXWORK_SECRET"), "WeChat Work app secret (or $WXWORK_SECRET)")
 	serve.Flags().String("wxwork-token", os.Getenv("WXWORK_TOKEN"), "WeChat Work callback verification token (or $WXWORK_TOKEN)")
 	serve.Flags().String("wxwork-aes-key", os.Getenv("WXWORK_ENCODING_AES_KEY"), "WeChat Work 43-char EncodingAESKey (or $WXWORK_ENCODING_AES_KEY)")
+	serve.Flags().String("slack-app-token", os.Getenv("SLACK_APP_TOKEN"), "Slack App-Level token (xapp-...) for Socket Mode (or $SLACK_APP_TOKEN)")
+	serve.Flags().String("slack-bot-token", os.Getenv("SLACK_BOT_TOKEN"), "Slack Bot User OAuth token (xoxb-...) for chat.postMessage (or $SLACK_BOT_TOKEN)")
 	serve.Flags().String("weixin-account-id", os.Getenv("WEIXIN_ACCOUNT_ID"), "Weixin (iLink) account_id from a prior weixin-login (or $WEIXIN_ACCOUNT_ID)")
 	serve.Flags().String("weixin-token", os.Getenv("WEIXIN_TOKEN"), "Weixin bot token override (default: read from --weixin-state-dir)")
 	serve.Flags().String("weixin-base-url", os.Getenv("WEIXIN_BASE_URL"), "Weixin iLink base URL override")
@@ -104,6 +106,13 @@ func buildAdapter(name string, cmd *cobra.Command) (gateway.Adapter, error) {
 		}, log.Default()), nil
 	case "weixin":
 		return loadWeixinAdapter(cmd)
+	case "slack":
+		appToken, _ := cmd.Flags().GetString("slack-app-token")
+		botToken, _ := cmd.Flags().GetString("slack-bot-token")
+		return gateway.NewSlackAdapter(gateway.SlackConfig{
+			AppToken: appToken,
+			BotToken: botToken,
+		}, log.Default())
 	case "wechat-work":
 		addr, _ := cmd.Flags().GetString("addr")
 		publicBase, _ := cmd.Flags().GetString("public-base-url")
