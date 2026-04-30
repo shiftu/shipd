@@ -635,6 +635,51 @@ func (s *Store) OpenBlob(r *Release) (io.ReadCloser, error) {
 	return s.blobs.Get(context.Background(), r.BlobKey)
 }
 
+// StorageStats is the snapshot of catalog-wide counts and bytes that the
+// /metrics endpoint exposes as gauges. BlobBytesUnique counts each
+// content-addressed blob once even when multiple release rows reference it,
+// so it tracks actual disk usage rather than referenced bytes.
+type StorageStats struct {
+	Apps            int64
+	ReleasesLive    int64
+	ReleasesYanked  int64
+	Tokens          int64
+	BlobBytesUnique int64
+}
+
+// Stats aggregates a small set of metrics-friendly counts in three queries.
+// Cheap on shipd-scale catalogs (dozens to thousands of rows); a Prometheus
+// scrape every 30s is well under the cost of one publish.
+func (s *Store) Stats(ctx context.Context) (StorageStats, error) {
+	var st StorageStats
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM apps`).Scan(&st.Apps); err != nil {
+		return st, err
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT
+		  COALESCE(SUM(CASE WHEN yanked = 0 THEN 1 ELSE 0 END), 0),
+		  COALESCE(SUM(CASE WHEN yanked = 1 THEN 1 ELSE 0 END), 0)
+		FROM releases
+	`).Scan(&st.ReleasesLive, &st.ReleasesYanked); err != nil {
+		return st, err
+	}
+	// DISTINCT by blob_key dedups: the same content uploaded under two
+	// release rows occupies one blob on disk.
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(size), 0) FROM (
+		  SELECT blob_key, MIN(size) AS size FROM releases GROUP BY blob_key
+		)
+	`).Scan(&st.BlobBytesUnique); err != nil {
+		return st, err
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tokens`).Scan(&st.Tokens); err != nil {
+		return st, err
+	}
+	return st, nil
+}
+
 // --- Tokens ---
 
 type Token struct {

@@ -851,6 +851,67 @@ func TestLatestReleasesEmptyApp(t *testing.T) {
 	}
 }
 
+// --- Stats ---
+
+// TestStatsAggregates: Stats counts apps/releases/tokens and dedups blob
+// bytes by blob_key. The dedup matters for /metrics — referenced bytes
+// would double-count when promote creates a second row pointing at the
+// same content.
+func TestStatsAggregates(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// Two apps; three releases on app-a (one yanked); one release on app-b
+	// promoted to a second channel (same blob_key — dedup).
+	publishOne(t, store, "app-a", "1.0.0", "stable", "")
+	publishOne(t, store, "app-a", "1.0.1", "stable", "")
+	rel := publishOne(t, store, "app-a", "1.0.2", "stable", "")
+	if err := store.YankRelease(ctx, "app-a", "1.0.0", "stable", ""); err != nil {
+		t.Fatalf("yank: %v", err)
+	}
+	if err := store.UpsertApp(ctx, "app-b", "ios"); err != nil {
+		t.Fatalf("UpsertApp: %v", err)
+	}
+	relB, err := store.PutRelease(ctx, Release{
+		AppName: "app-b", Version: "1.0.0", Channel: "beta",
+	}, strings.NewReader("dedup-target"))
+	if err != nil {
+		t.Fatalf("PutRelease b/beta: %v", err)
+	}
+	// Promote to stable — identical bytes reuse blob_key.
+	if _, err := store.PromoteRelease(ctx, "app-b", "1.0.0", "beta", "stable"); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if err := store.CreateToken(ctx, "ci", "shipd_test_ci", "rw", 0); err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	s, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if s.Apps != 2 {
+		t.Errorf("Apps = %d, want 2", s.Apps)
+	}
+	if s.ReleasesLive != 4 || s.ReleasesYanked != 1 {
+		t.Errorf("ReleasesLive=%d ReleasesYanked=%d, want 4/1", s.ReleasesLive, s.ReleasesYanked)
+	}
+	if s.Tokens != 1 {
+		t.Errorf("Tokens = %d, want 1", s.Tokens)
+	}
+	// app-a has three distinct payloads (publishOne uses unique bodies);
+	// app-b's two release rows share one blob_key. Total unique blobs = 4.
+	want := rel.Size*3 + relB.Size
+	if s.BlobBytesUnique != want {
+		t.Errorf("BlobBytesUnique = %d, want %d (dedup applied to app-b)", s.BlobBytesUnique, want)
+	}
+}
+
 // --- ParseTTL ---
 
 // TestParseTTL covers the duration shapes both shipd's CLI flags

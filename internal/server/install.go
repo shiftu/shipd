@@ -156,6 +156,7 @@ func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
 	// The page embeds freshly-minted signed URLs on every render; caching
 	// would serve stale (expired) URLs to later visitors.
 	w.Header().Set("Cache-Control", "no-store")
+	s.metrics.installPageRenders.Add(1)
 	if err := installTmpl.Execute(w, data); err != nil {
 		s.log.Printf("install template: %v", err)
 	}
@@ -246,6 +247,7 @@ func (s *Server) handleInstallDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", rel.Size))
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, rel.Filename))
 	w.Header().Set("X-Content-SHA256", rel.SHA256)
+	s.metrics.downloadInstall.Add(1)
 	if _, err := io.Copy(w, body); err != nil && !errors.Is(err, io.EOF) {
 		s.log.Printf("install download stream: %v", err)
 	}

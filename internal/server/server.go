@@ -36,18 +36,19 @@ type Config struct {
 
 // Server is a thin wrapper around http.Server holding shared state.
 type Server struct {
-	cfg    Config
-	store  *storage.Store
-	mux    *http.ServeMux
-	log    *log.Logger
-	signer *installSigner // nil when InstallURLTTL == 0
+	cfg     Config
+	store   *storage.Store
+	mux     *http.ServeMux
+	log     *log.Logger
+	signer  *installSigner // nil when InstallURLTTL == 0
+	metrics *metrics
 }
 
 func New(cfg Config, store *storage.Store, logger *log.Logger) (*Server, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
-	s := &Server{cfg: cfg, store: store, mux: http.NewServeMux(), log: logger}
+	s := &Server{cfg: cfg, store: store, mux: http.NewServeMux(), log: logger, metrics: &metrics{}}
 
 	if cfg.InstallURLTTL > 0 {
 		secret, err := loadOrGenInstallSecret(cfg.DataDir, cfg.InstallURLSecret)
@@ -102,6 +103,11 @@ func (s *Server) bootstrapToken(ctx context.Context) error {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", s.handleHealth)
+	// /metrics is admin-scoped: a Prometheus scraper configures its
+	// authorization with an admin token via the standard Bearer flow.
+	// Operational counts and storage stats leak more than reads do, so
+	// this stays out of the public surface even when --public-reads is on.
+	s.mux.HandleFunc("GET /metrics", s.requireAdmin(s.handleMetrics))
 	s.mux.HandleFunc("GET /api/v1/apps", s.requireRead(s.handleListApps))
 	s.mux.HandleFunc("GET /api/v1/apps/{name}", s.requireRead(s.handleGetApp))
 	s.mux.HandleFunc("GET /api/v1/apps/{name}/releases", s.requireRead(s.handleListReleases))
@@ -146,6 +152,7 @@ func (s *Server) verifyInstallSig(h http.HandlerFunc, redirectOnFail bool) http.
 		}
 		q := r.URL.Query()
 		if err := s.signer.Verify(r.URL.Path, q.Get("exp"), q.Get("sig")); err != nil {
+			s.metrics.installSigFail.Add(1)
 			s.log.Printf("install-url verify failed: path=%s err=%v", r.URL.Path, err)
 			if redirectOnFail {
 				page := "/install/" + url.PathEscape(r.PathValue("name")) +
@@ -166,6 +173,16 @@ func (s *Server) verifyInstallSig(h http.HandlerFunc, redirectOnFail bool) http.
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.store.Stats(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	s.metrics.writeProm(w, stats)
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +256,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", rel.Size))
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, rel.Filename))
 	w.Header().Set("X-Content-SHA256", rel.SHA256)
+	s.metrics.downloadAPI.Add(1)
 	if _, err := copyTo(w, body); err != nil {
 		s.log.Printf("download stream error: %v", err)
 	}
@@ -297,12 +315,15 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}, r.Body)
 	if err != nil {
 		if errors.Is(err, storage.ErrAlreadyExists) {
+			s.metrics.publishConflict.Add(1)
 			writeError(w, http.StatusConflict, err)
 			return
 		}
+		s.metrics.publishError.Add(1)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.metrics.publishOK.Add(1)
 	writeJSON(w, http.StatusCreated, rel)
 }
 
@@ -315,6 +336,7 @@ func (s *Server) handleYank(w http.ResponseWriter, r *http.Request) {
 		writeStorageError(w, err)
 		return
 	}
+	s.metrics.yankOK.Add(1)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "yanked"})
 }
 
@@ -343,6 +365,7 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.metrics.promoteOK.Add(1)
 	writeJSON(w, http.StatusCreated, rel)
 }
 
@@ -357,6 +380,7 @@ func (s *Server) handleUnyank(w http.ResponseWriter, r *http.Request) {
 		writeStorageError(w, err)
 		return
 	}
+	s.metrics.unyankOK.Add(1)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "unyanked"})
 }
 
@@ -392,6 +416,11 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	doDelete := q.Get("delete") == "true" || q.Get("delete") == "1"
+	if doDelete {
+		s.metrics.gcDeleteRuns.Add(1)
+	} else {
+		s.metrics.gcRuns.Add(1)
+	}
 
 	cands, err := s.store.GCCandidates(r.Context(), olderThan, keepLast)
 	if err != nil {
@@ -435,10 +464,13 @@ func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
 				entry.Action = "deleted"
 				resp.RowsDeleted++
 				resp.BlobsDeleted++
+				s.metrics.gcRowsDeleted.Add(1)
+				s.metrics.gcBlobsDeleted.Add(1)
 			default:
 				entry.Action = "row-deleted-blob-shared"
 				resp.RowsDeleted++
 				resp.BlobsKept++
+				s.metrics.gcRowsDeleted.Add(1)
 			}
 		}
 		resp.Candidates = append(resp.Candidates, entry)
@@ -495,6 +527,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	s.metrics.tokensCreated.Add(1)
 	s.log.Printf("admin: created token name=%q scope=%q expires_at=%d", name, scope, expiresAt)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"name":       name,
@@ -537,6 +570,7 @@ func (s *Server) requireToken(h http.HandlerFunc, minScope string) http.HandlerF
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok := extractToken(r)
 		if tok == "" {
+			s.metrics.authInvalid.Add(1)
 			writeError(w, http.StatusUnauthorized, fmt.Errorf("missing token"))
 			return
 		}
@@ -546,13 +580,16 @@ func (s *Server) requireToken(h http.HandlerFunc, minScope string) http.HandlerF
 			// substantially helps a legitimate user understand why their
 			// previously-working token suddenly stopped — a worthwhile trade.
 			if errors.Is(err, storage.ErrExpired) {
+				s.metrics.authExpired.Add(1)
 				writeError(w, http.StatusUnauthorized, fmt.Errorf("token expired"))
 				return
 			}
+			s.metrics.authInvalid.Add(1)
 			writeError(w, http.StatusUnauthorized, fmt.Errorf("invalid token"))
 			return
 		}
 		if minScope != "" && scopeRank[t.Scope] < scopeRank[minScope] {
+			s.metrics.authForbidden.Add(1)
 			writeError(w, http.StatusForbidden,
 				fmt.Errorf("token scope %q insufficient (need %q)", t.Scope, minScope))
 			return
