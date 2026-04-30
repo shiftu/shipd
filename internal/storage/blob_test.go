@@ -59,8 +59,9 @@ func TestFSBlobStoreRoundTrip(t *testing.T) {
 }
 
 // fakeS3 is a minimal in-process server that speaks just enough of the S3
-// protocol for our Put/Head/Get path. It's not a full S3 emulator — calls
-// outside that surface 501 to flag accidental dependency on more endpoints.
+// protocol for our Put/Head/Get/Delete paths. It's not a full S3 emulator
+// — calls outside that surface 501 to flag accidental dependency on more
+// endpoints.
 type fakeS3 struct {
 	mu      sync.Mutex
 	objects map[string][]byte
@@ -96,6 +97,13 @@ func (f *fakeS3) Server() *httptest.Server {
 				return
 			}
 			_, _ = w.Write(body)
+		case http.MethodDelete:
+			// S3 returns 204 even when the object is missing, matching the
+			// idempotent contract our BlobStore.Delete relies on.
+			f.mu.Lock()
+			delete(f.objects, key)
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
 		}
@@ -181,6 +189,77 @@ func TestS3BlobStoreRoundTripAgainstFake(t *testing.T) {
 	fake.mu.Unlock()
 	if current != "tampered" {
 		t.Errorf("expected dedup to skip upload, but object was overwritten to %q", current)
+	}
+}
+
+// TestFSBlobStoreDelete: Delete removes the file; deleting a missing key is
+// idempotent (no error). gc relies on both behaviors.
+func TestFSBlobStoreDelete(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewFSBlobStore(dir)
+	if err != nil {
+		t.Fatalf("NewFSBlobStore: %v", err)
+	}
+	ctx := context.Background()
+
+	key, _, _, err := store.Put(ctx, strings.NewReader("delete me"))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := store.Delete(ctx, key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := store.Get(ctx, key); err == nil {
+		t.Error("expected Get after Delete to fail")
+	}
+	// Idempotent: deleting again is fine.
+	if err := store.Delete(ctx, key); err != nil {
+		t.Errorf("second Delete should be idempotent, got %v", err)
+	}
+	// Deleting an unrelated never-Put key is fine.
+	if err := store.Delete(ctx, "deadbeef"); err != nil {
+		t.Errorf("Delete of missing key should be idempotent, got %v", err)
+	}
+}
+
+// TestS3BlobStoreDelete: Delete removes the object via fakeS3's DELETE
+// branch; deleting a missing key remains a 204 (idempotent), matching real
+// S3 behavior.
+func TestS3BlobStoreDelete(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	fake := newFakeS3()
+	srv := fake.Server()
+	defer srv.Close()
+
+	ctx := context.Background()
+	store, err := NewS3BlobStore(ctx, S3Config{
+		Bucket: "test-bucket", Region: "us-east-1", Endpoint: srv.URL,
+		Prefix: "blobs/", PathStyle: true,
+	})
+	if err != nil {
+		t.Fatalf("NewS3BlobStore: %v", err)
+	}
+
+	key, _, _, err := store.Put(ctx, strings.NewReader("bye"))
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := store.Delete(ctx, key); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	wantPath := "test-bucket/blobs/" + key[:2] + "/" + key[2:]
+	fake.mu.Lock()
+	_, stillThere := fake.objects[wantPath]
+	fake.mu.Unlock()
+	if stillThere {
+		t.Errorf("object %q still present after Delete", wantPath)
+	}
+	// Idempotent: deleting again returns 204 → nil.
+	if err := store.Delete(ctx, key); err != nil {
+		t.Errorf("second Delete should be idempotent, got %v", err)
 	}
 }
 

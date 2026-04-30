@@ -29,6 +29,12 @@ type BlobStore interface {
 	// Get returns a reader over the bytes stored under key. The caller must
 	// close the reader.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+
+	// Delete removes the bytes stored under key. Idempotent: deleting a
+	// missing key is not an error (S3 returns 204; the FS backend swallows
+	// os.IsNotExist). Used by `shipd gc` to reclaim storage from yanked
+	// releases.
+	Delete(ctx context.Context, key string) error
 }
 
 // stagedBlob streams body through a SHA-256 hasher into a temp file, returning
@@ -100,6 +106,13 @@ func (s *FSBlobStore) Put(_ context.Context, body io.Reader) (string, int64, str
 
 func (s *FSBlobStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	return os.Open(s.path(key))
+}
+
+func (s *FSBlobStore) Delete(_ context.Context, key string) error {
+	if err := os.Remove(s.path(key)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (s *FSBlobStore) path(key string) string {

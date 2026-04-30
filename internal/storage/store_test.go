@@ -308,6 +308,238 @@ func TestPromoteReleaseRefusesSameChannel(t *testing.T) {
 	}
 }
 
+// --- GC ---
+
+// TestYankRecordsYankedAt: yanking a release stamps the time, so gc can
+// later filter by --older-than.
+func TestYankRecordsYankedAt(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "stable", "")
+	before := time.Now().Unix()
+	if err := store.YankRelease(ctx, "myapp", "1.0.0", "stable", "broken"); err != nil {
+		t.Fatalf("YankRelease: %v", err)
+	}
+	after := time.Now().Unix()
+
+	rel, err := store.GetRelease(ctx, "myapp", "1.0.0", "stable")
+	if err != nil {
+		t.Fatalf("GetRelease: %v", err)
+	}
+	if rel.YankedAt < before || rel.YankedAt > after {
+		t.Errorf("YankedAt = %d, expected within [%d, %d]", rel.YankedAt, before, after)
+	}
+}
+
+// TestGCCandidatesFiltersByYankAge: only releases yanked more than the
+// olderThan window ago are returned. Recently-yanked releases must NOT
+// appear, since they may still be needed (yank reasons sometimes get
+// reversed within hours).
+func TestGCCandidatesFiltersByYankAge(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "stable", "")
+	publishOne(t, store, "myapp", "1.0.1", "stable", "")
+	if err := store.YankRelease(ctx, "myapp", "1.0.0", "stable", ""); err != nil {
+		t.Fatalf("yank 1.0.0: %v", err)
+	}
+	if err := store.YankRelease(ctx, "myapp", "1.0.1", "stable", ""); err != nil {
+		t.Fatalf("yank 1.0.1: %v", err)
+	}
+	// Backdate 1.0.0 to ~60 days ago, leave 1.0.1 just-yanked.
+	old := time.Now().Add(-60 * 24 * time.Hour).Unix()
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE releases SET yanked_at = ? WHERE version = '1.0.0'`, old); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	got30d, err := store.GCCandidates(ctx, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("GCCandidates 30d: %v", err)
+	}
+	if len(got30d) != 1 || got30d[0].Version != "1.0.0" {
+		t.Errorf("with 30d window expected only 1.0.0, got %v", versionList(got30d))
+	}
+
+	got0, err := store.GCCandidates(ctx, 0)
+	if err != nil {
+		t.Fatalf("GCCandidates 0: %v", err)
+	}
+	if len(got0) != 2 {
+		t.Errorf("with 0 window expected both, got %v", versionList(got0))
+	}
+}
+
+// TestGCCandidatesIncludesPreMigrationYanks: rows yanked before the
+// yanked_at column existed have yanked_at=0, which sorts as "the dawn of
+// time" and must always be eligible. Operators upgrading shipd shouldn't
+// have to manually patch old yanks to be GC-able.
+func TestGCCandidatesIncludesPreMigrationYanks(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "stable", "")
+	if err := store.YankRelease(ctx, "myapp", "1.0.0", "stable", ""); err != nil {
+		t.Fatalf("yank: %v", err)
+	}
+	// Simulate a pre-migration yank: yanked=1 but yanked_at=0.
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE releases SET yanked_at = 0 WHERE version = '1.0.0'`); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	got, err := store.GCCandidates(ctx, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("GCCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].YankedAt != 0 {
+		t.Errorf("expected pre-migration yank to be eligible, got %+v", got)
+	}
+}
+
+// TestGCCandidatesIgnoresLiveReleases: only yanked rows are candidates;
+// non-yanked releases must never appear, no matter how old.
+func TestGCCandidatesIgnoresLiveReleases(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "stable", "")
+	got, err := store.GCCandidates(ctx, 0)
+	if err != nil {
+		t.Fatalf("GCCandidates: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected no candidates among live releases, got %v", versionList(got))
+	}
+}
+
+// TestDeleteReleaseAndBlobHappyPath: row gone from SQLite, blob gone from
+// storage.
+func TestDeleteReleaseAndBlobHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	rel := publishOne(t, store, "myapp", "1.0.0", "stable", "")
+	blobDeleted, err := store.DeleteReleaseAndBlob(ctx, "myapp", "1.0.0", "stable")
+	if err != nil {
+		t.Fatalf("DeleteReleaseAndBlob: %v", err)
+	}
+	if !blobDeleted {
+		t.Error("expected blobDeleted=true (no other release shares this blob)")
+	}
+	if _, err := store.GetRelease(ctx, "myapp", "1.0.0", "stable"); err == nil {
+		t.Error("expected GetRelease to return ErrNotFound after delete")
+	}
+	if _, err := store.blobs.Get(ctx, rel.BlobKey); err == nil {
+		t.Error("expected blob to be gone after delete")
+	}
+}
+
+// TestDeleteReleaseAndBlobKeepsSharedBlob is the dedup-safety case. When
+// two releases share a content-addressed blob (because their bytes are
+// identical), deleting one must leave the blob in place for the other.
+// Bytes are the same when both PutRelease calls hand the same content to
+// stagedBlob — easy to force in a test.
+func TestDeleteReleaseAndBlobKeepsSharedBlob(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	if err := store.UpsertApp(ctx, "myapp", "ios"); err != nil {
+		t.Fatalf("UpsertApp: %v", err)
+	}
+	relA, err := store.PutRelease(ctx, Release{
+		AppName: "myapp", Version: "1.0.0", Channel: "beta",
+		Filename: "a.ipa",
+	}, strings.NewReader("identical-bytes"))
+	if err != nil {
+		t.Fatalf("PutRelease A: %v", err)
+	}
+	relB, err := store.PutRelease(ctx, Release{
+		AppName: "myapp", Version: "1.0.0", Channel: "stable",
+		Filename: "b.ipa",
+	}, strings.NewReader("identical-bytes"))
+	if err != nil {
+		t.Fatalf("PutRelease B: %v", err)
+	}
+	if relA.BlobKey != relB.BlobKey {
+		t.Fatalf("expected dedup; got distinct keys %s / %s", relA.BlobKey, relB.BlobKey)
+	}
+
+	blobDeleted, err := store.DeleteReleaseAndBlob(ctx, "myapp", "1.0.0", "beta")
+	if err != nil {
+		t.Fatalf("DeleteReleaseAndBlob: %v", err)
+	}
+	if blobDeleted {
+		t.Error("expected blobDeleted=false (other release still references the blob)")
+	}
+	// stable row still resolvable, blob still readable through it.
+	stable, err := store.GetRelease(ctx, "myapp", "1.0.0", "stable")
+	if err != nil {
+		t.Fatalf("GetRelease stable: %v", err)
+	}
+	rc, err := store.OpenBlob(stable)
+	if err != nil {
+		t.Fatalf("OpenBlob: %v", err)
+	}
+	rc.Close()
+}
+
+// TestDeleteReleaseAndBlobMissing: deleting a non-existent release returns
+// ErrNotFound rather than silently succeeding.
+func TestDeleteReleaseAndBlobMissing(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	_, err = store.DeleteReleaseAndBlob(context.Background(), "ghost", "1.0.0", "stable")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func versionList(rels []Release) []string {
+	out := make([]string, len(rels))
+	for i, r := range rels {
+		out[i] = r.Version
+	}
+	return out
+}
+
 // --- LatestReleases ---
 
 // putReleaseForPlatform creates a release on a specific platform without the

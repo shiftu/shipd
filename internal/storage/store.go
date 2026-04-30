@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS releases (
   notes         TEXT NOT NULL DEFAULT '',
   yanked        INTEGER NOT NULL DEFAULT 0,
   yanked_reason TEXT NOT NULL DEFAULT '',
+  yanked_at     INTEGER NOT NULL DEFAULT 0,
   bundle_id     TEXT NOT NULL DEFAULT '',
   display_name  TEXT NOT NULL DEFAULT '',
   created_at    INTEGER NOT NULL,
@@ -110,6 +111,7 @@ func migrate(db *sql.DB) error {
 		`ALTER TABLE releases ADD COLUMN bundle_id    TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE releases ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE releases ADD COLUMN platform     TEXT NOT NULL DEFAULT 'generic'`,
+		`ALTER TABLE releases ADD COLUMN yanked_at    INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE tokens   ADD COLUMN expires_at   INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
@@ -181,6 +183,7 @@ type Release struct {
 	Notes        string `json:"notes"`
 	Yanked       bool   `json:"yanked"`
 	YankedReason string `json:"yanked_reason,omitempty"`
+	YankedAt     int64  `json:"yanked_at,omitempty"`
 	BundleID     string `json:"bundle_id,omitempty"`
 	DisplayName  string `json:"display_name,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
@@ -250,7 +253,7 @@ func (s *Store) GetRelease(ctx context.Context, app, version, channel string) (*
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
 		FROM releases
 		WHERE app_name = ? AND version = ? AND channel = ?
 	`, app, version, channel)
@@ -301,7 +304,7 @@ func (s *Store) LatestRelease(ctx context.Context, app, channel string) (*Releas
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
 		FROM releases
 		WHERE app_name = ? AND channel = ? AND yanked = 0
 		ORDER BY created_at DESC, rowid DESC
@@ -313,7 +316,7 @@ func (s *Store) LatestRelease(ctx context.Context, app, channel string) (*Releas
 func (s *Store) ListReleases(ctx context.Context, app string) ([]Release, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
 		FROM releases
 		WHERE app_name = ?
 		ORDER BY created_at DESC, rowid DESC
@@ -338,9 +341,9 @@ func (s *Store) YankRelease(ctx context.Context, app, version, channel, reason s
 		channel = "stable"
 	}
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE releases SET yanked = 1, yanked_reason = ?
+		UPDATE releases SET yanked = 1, yanked_reason = ?, yanked_at = ?
 		WHERE app_name = ? AND version = ? AND channel = ?
-	`, reason, app, version, channel)
+	`, reason, time.Now().Unix(), app, version, channel)
 	if err != nil {
 		return err
 	}
@@ -349,6 +352,94 @@ func (s *Store) YankRelease(ctx context.Context, app, version, channel, reason s
 		return ErrNotFound
 	}
 	return nil
+}
+
+// GCCandidates returns yanked releases whose yank happened more than
+// olderThan ago — i.e., the rows whose blobs `shipd gc --delete` would
+// reclaim. olderThan == 0 means "any age (even just-yanked)". Releases
+// yanked before the yanked_at column was introduced have yanked_at = 0,
+// which sorts as "the dawn of time" and is therefore always eligible — the
+// operator wanting to GC ancient pre-migration yanks gets the right
+// behavior automatically.
+//
+// The returned slice is what the caller would pass to DeleteReleaseAndBlob;
+// dedup-safe deletion (skipping the blob when it's still referenced by a
+// non-candidate release) lives in DeleteReleaseAndBlob, not here.
+func (s *Store) GCCandidates(ctx context.Context, olderThan time.Duration) ([]Release, error) {
+	cutoff := time.Now().Add(-olderThan).Unix()
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
+		FROM releases
+		WHERE yanked = 1 AND yanked_at <= ?
+		ORDER BY yanked_at, app_name, version
+	`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Release
+	for rows.Next() {
+		r, err := scanReleaseRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+// DeleteReleaseAndBlob removes a release row and, if no other release rows
+// reference the same content-addressed blob, deletes the blob too. Returns
+// whether the blob was actually deleted (false means it was kept because
+// another release shares it via dedup).
+//
+// Order of operations matters: the metadata row is deleted first, then
+// remaining references are counted. If a blob delete fails (transient S3
+// or FS error), the metadata is already gone and the orphaned bytes will
+// linger — accepted as a small cost since orphan blobs are storage-bill
+// noise but a row pointing at missing bytes would be a download error
+// surfaced to users. Operators can re-run gc later; the row is gone so a
+// second pass won't re-process this release.
+//
+// This is destructive: any pinned download URL bound to (app, version,
+// channel) will return 404 after this call. The CLI gates it behind an
+// explicit --delete flag.
+func (s *Store) DeleteReleaseAndBlob(ctx context.Context, app, version, channel string) (blobDeleted bool, err error) {
+	if channel == "" {
+		channel = "stable"
+	}
+
+	var blobKey string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT blob_key FROM releases WHERE app_name = ? AND version = ? AND channel = ?
+	`, app, version, channel).Scan(&blobKey); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, ErrNotFound
+		}
+		return false, err
+	}
+
+	if _, err := s.db.ExecContext(ctx, `
+		DELETE FROM releases WHERE app_name = ? AND version = ? AND channel = ?
+	`, app, version, channel); err != nil {
+		return false, err
+	}
+
+	var refs int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM releases WHERE blob_key = ?`, blobKey).Scan(&refs); err != nil {
+		return false, fmt.Errorf("count remaining refs: %w", err)
+	}
+	if refs > 0 {
+		// Dedup'd: another release still backs onto this blob. Keep the bytes.
+		return false, nil
+	}
+
+	if err := s.blobs.Delete(ctx, blobKey); err != nil {
+		return false, fmt.Errorf("delete blob %s: %w", blobKey, err)
+	}
+	return true, nil
 }
 
 // PromoteRelease creates a new release row on dstChannel that points at the
@@ -427,7 +518,7 @@ func (s *Store) PromoteRelease(ctx context.Context, app, version, srcChannel, ds
 func (s *Store) releasesForVersion(ctx context.Context, app, version string) ([]Release, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
 		FROM releases
 		WHERE app_name = ? AND version = ?
 		ORDER BY channel
@@ -556,7 +647,7 @@ func scanRelease(s scanner) (*Release, error) {
 	var r Release
 	var yanked int
 	if err := s.Scan(&r.AppName, &r.Version, &r.Channel, &r.Platform, &r.BlobKey, &r.Size, &r.SHA256,
-		&r.Filename, &r.Notes, &yanked, &r.YankedReason,
+		&r.Filename, &r.Notes, &yanked, &r.YankedReason, &r.YankedAt,
 		&r.BundleID, &r.DisplayName, &r.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound

@@ -32,6 +32,7 @@ func NewRoot(version string) *cobra.Command {
 		newYankCmd(),
 		newPromoteCmd(),
 		newTokenCmd(),
+		newGCCmd(),
 		newMCPCmd(),
 		newGatewayCmd(),
 	)

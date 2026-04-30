@@ -124,6 +124,19 @@ func (s *S3BlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error
 	return out.Body, nil
 }
 
+// Delete removes the object at key. S3 returns 204 even when the object is
+// missing, so the call is idempotent — gc can re-run safely.
+func (s *S3BlobStore) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.cfg.Bucket),
+		Key:    aws.String(s.objectKey(key)),
+	})
+	if err != nil {
+		return fmt.Errorf("s3 delete: %w", err)
+	}
+	return nil
+}
+
 // objectKey applies the configured prefix and the same two-character split
 // as the FS backend, so a single blob's path looks the same shape across
 // backends ("ab/cdef..."). The split is purely cosmetic for S3 — listings
