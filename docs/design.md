@@ -81,68 +81,11 @@ Notes:
 - Token admin (`shipd token create/list/revoke`) talks to the local SQLite
   directly, intentionally — the operator runs it on the server host.
 
-## Roadmap
+## Changelog
 
-### Done (v0.1)
-- Server + storage + CLI for the full publish/list/info/download/yank cycle
-- API token auth, SHA-256 download verification
+Version order, newest first.
 
-### Done (v0.2 → bumped: MCP shipped before install pages)
-- `shipd mcp serve` exposes shipd verbs as MCP tools over stdio JSON-RPC
-- Tools: `shipd_list_apps`, `shipd_list_releases`, `shipd_get_release`,
-  `shipd_yank_release`, `shipd_publish`, `shipd_download_url`
-- Hand-rolled JSON-RPC dispatcher (no external MCP dep), spec-compliant
-  enough for Claude Desktop / Cursor
-
-### Done (v0.3 — Message gateway)
-- `shipd gateway serve --adapter <stdio|feishu>` shipped
-- Reuses the MCP `Registry` so chat verbs and MCP tools share one impl
-- Chat verbs: `list`, `info`, `url`, `yank`, `help`
-- Stdio adapter is a local REPL useful for development
-- Feishu adapter implements URL-verification handshake, message events
-  (`im.message.receive_v1`), tenant-token caching with 60s pre-expiry
-  refresh, and reply via `im/v1/messages`
-- Encrypted Feishu payloads, Slack, WeChat-Work, Telegram are deferred —
-  the Adapter interface is small enough that a new transport is ~150 LOC
-
-### Done (v0.4 — Install pages)
-- `/install/{app}` and `/install/{app}/{version}` render an HTML page
-  with a platform-appropriate install button and an inline QR code
-- `/install/{app}/{version}/manifest.plist` returns a valid iOS install
-  manifest; releases without `bundle_id` get a 422 with an actionable error
-- `/install/{app}/{version}/download` streams the artifact bytes without a
-  token, so iOS itms-services and direct browser installs work
-- All `/install/...` routes are intentionally public; gate with a reverse
-  proxy if you need privacy
-- Schema changes: `bundle_id`, `display_name`, and `platform` columns on
-  `releases`, with idempotent `ALTER TABLE` migrations so existing DBs
-  upgrade automatically
-- Optional download tokens (short-lived URL-signed downloads) deferred
-  until there is a real privacy use case
-
-### v0.5 — More gateway adapters
-- WeChat Work, Slack, Telegram
-- Feishu encrypted payload support (AES-256-CBC unwrap)
-- Streaming: long-running commands stream output back as message updates
-- Optional LLM mode: free-form `@bot ask "..."` runs through an Agent with
-  shipd's MCP tools available
-
-### Done (v0.5 — AI hooks)
-- `shipd publish --ai-notes`: pulls `git log <prev-version-tag>..HEAD`,
-  sends to Claude with a cacheable system prompt, fills in the release
-  notes. `--ai-since` overrides the auto-detected previous version.
-- Free-form `ask <text>` verb on the gateway: the message is handed to a
-  tool-use agent that has the same six tools the MCP server exposes.
-  When `ANTHROPIC_API_KEY` is unset on the gateway server, `ask` replies
-  with a clear "not enabled" message instead of hanging.
-- Hand-rolled Anthropic /v1/messages client (no Go SDK dependency); ~150
-  LOC, supports prompt caching and tool-use blocks. Default model is
-  Sonnet 4.6; configurable via `--ai-model`.
-- Bounded loop: agent caps at 8 tool-use iterations per Ask call to
-  defend against runaway models, and 1024 output tokens per call to keep
-  chat replies short.
-
-### Done (v0.9 — Pluggable blob storage + S3 backend)
+### v0.9 — Pluggable blob storage + S3 backend
 - New `storage.BlobStore` interface decouples the metadata layer (still
   SQLite) from the bytes-on-disk layer. Two implementations live in
   `internal/storage/`: `FSBlobStore` (the existing local FS path,
@@ -164,7 +107,7 @@ Notes:
   transitively by the default credential chain). Acceptable for now;
   build tags to drop S3 from FS-only builds is a future option
 
-### Done (v0.8 — Feishu WebSocket long-connection mode)
+### v0.8 — Feishu WebSocket long-connection mode
 - `shipd gateway serve --adapter feishu` now defaults to `--feishu-mode
   websocket`, mirroring Hermes Agent's default
 - Long-connection path uses `github.com/larksuite/oapi-sdk-go/v3/ws` —
@@ -179,7 +122,7 @@ Notes:
 - Binary size: +2.1 MB from the SDK pull (gogo/protobuf, gorilla/websocket,
   lark service models). Acceptable for the UX win
 
-### Done (v0.7 — WeChat personal-account adapter via iLink)
+### v0.7 — WeChat personal-account adapter via iLink
 - `shipd gateway weixin-login` runs an interactive QR login (ASCII QR
   rendered in the terminal) against Tencent's iLink endpoint and persists
   the resulting `bot_token` to `<state-dir>/<account_id>.json` (mode 0600)
@@ -197,7 +140,7 @@ Notes:
 - Reverse-engineered protocol: documented prominently in the help text
   and the README that this is best-effort and not guaranteed ToS-compliant
 
-### Done (v0.6 — WeChat Work adapter)
+### v0.6 — WeChat Work adapter
 - `shipd gateway serve --adapter wechat-work` shipped
 - Implements the full WeChat Work app callback contract: SHA1 msg_signature
   verification, AES-256-CBC message decryption with PKCS#7 unpadding,
@@ -210,24 +153,144 @@ Notes:
 - Hand-rolled crypto with round-trip and signature tests passing; no
   external crypto deps
 
-### v0.7 — More AI
-- Crash clustering: if a `crash report` API is added, embed stacktraces
-  and cluster.
-- Natural-language query: "which version had the highest crash rate last
-  week?" → tool-use agent with a SQL aggregation tool.
-- Stream tool-use loops back into the chat as live updates so a user
-  sees "calling shipd_list_releases..." during long ask sessions.
+### v0.5 — AI hooks
+- `shipd publish --ai-notes`: pulls `git log <prev-version-tag>..HEAD`,
+  sends to Claude with a cacheable system prompt, fills in the release
+  notes. `--ai-since` overrides the auto-detected previous version.
+- Free-form `ask <text>` verb on the gateway: the message is handed to a
+  tool-use agent that has the same six tools the MCP server exposes.
+  When `ANTHROPIC_API_KEY` is unset on the gateway server, `ask` replies
+  with a clear "not enabled" message instead of hanging.
+- Hand-rolled Anthropic /v1/messages client (no Go SDK dependency); ~150
+  LOC, supports prompt caching and tool-use blocks. Default model is
+  Sonnet 4.6; configurable via `--ai-model`.
+- Bounded loop: agent caps at 8 tool-use iterations per Ask call to
+  defend against runaway models, and 1024 output tokens per call to keep
+  chat replies short.
 
-### v0.10 — More cloud storage
-- S3 / R2 / OSS / GCS blob backends via gocloud.dev/blob
-- Optional CDN integration for download endpoints
+### v0.4 — Install pages
+- `/install/{app}` and `/install/{app}/{version}` render an HTML page
+  with a platform-appropriate install button and an inline QR code
+- `/install/{app}/{version}/manifest.plist` returns a valid iOS install
+  manifest; releases without `bundle_id` get a 422 with an actionable error
+- `/install/{app}/{version}/download` streams the artifact bytes without a
+  token, so iOS itms-services and direct browser installs work
+- All `/install/...` routes are intentionally public; gate with a reverse
+  proxy if you need privacy
+- Schema changes: `bundle_id`, `display_name`, and `platform` columns on
+  `releases`, with idempotent `ALTER TABLE` migrations so existing DBs
+  upgrade automatically
+
+### v0.3 — Message gateway (stdio + Feishu webhook)
+- `shipd gateway serve --adapter <stdio|feishu>` shipped
+- Reuses the MCP `Registry` so chat verbs and MCP tools share one impl
+- Chat verbs: `list`, `info`, `url`, `yank`, `help`
+- Stdio adapter is a local REPL useful for development
+- Feishu adapter implements URL-verification handshake, message events
+  (`im.message.receive_v1`), tenant-token caching with 60s pre-expiry
+  refresh, and reply via `im/v1/messages`
+
+### v0.2 — MCP server
+- `shipd mcp serve` exposes shipd verbs as MCP tools over stdio JSON-RPC
+- Tools: `shipd_list_apps`, `shipd_list_releases`, `shipd_get_release`,
+  `shipd_yank_release`, `shipd_publish`, `shipd_download_url`
+- Hand-rolled JSON-RPC dispatcher (no external MCP dep), spec-compliant
+  enough for Claude Desktop / Cursor
+
+### v0.1 — Server + storage + CLI
+- Server + storage + CLI for the full publish/list/info/download/yank cycle
+- API token auth, SHA-256 download verification
+
+## Roadmap
+
+The goal of v1.0 is "good enough to run for someone else": hardening, the
+gaps that today require a sysadmin to work around, and the chat-UX cliff in
+the `ask` verb. Items below are roughly in ROI order — not all are required
+for a 1.0 cut, but they're the next things worth touching.
+
+### v1.0 — production-readiness
+
+- **Streaming `ask` replies.** The `ask` verb's tool-use loop blocks silently
+  for 5–30s before any text reaches the chat — looks hung. The `Asker`
+  interface should grow a streaming variant that emits `calling X...` /
+  partial-text updates per iteration; adapters that support message edits
+  (Feishu, Slack) update in place, others fall back to the current behavior.
+
+- **Slack adapter.** The agent-first audience overlaps far more with Slack
+  than Telegram. Should reuse the WeChat Work playbook (signing-secret
+  verification, async dispatch, `chat.postMessage` reply). ~300 LOC.
+
+- **Channel promotion verb.** `releases.channel` exists in the schema but
+  there's no API to promote a release between channels. Add `shipd promote
+  <app>@<version> --to stable` (CLI + HTTP + MCP tool). Implementation is a
+  zero-byte copy: insert a new releases row pointing at the same `blob_key`.
+
+- **Concurrent-publish dedup.** Two clients publishing the same
+  (app, version, channel) today both upload the full blob before the UNIQUE
+  constraint trips one of them. Wasted S3 PUTs cost real money. Cheap fix:
+  pre-check the row inside `Store.PutRelease` before opening the body
+  stream; the UNIQUE constraint stays as the source-of-truth backstop.
+
+- **Short-lived signed download URLs.** `/install/{app}/{version}/download`
+  is fully public today. Once anyone fronts shipd on the open internet, that
+  becomes a real privacy hole. Add an HMAC-signed query param with a short
+  TTL (e.g. 10 min); install pages mint signed URLs at render time.
+
+- **Token expiry / rotation.** Tokens never expire; this fails enterprise
+  audits. Add `expires_at` to `tokens`, default-null = never, and a
+  `--ttl 90d` flag on `token create`. Lookup checks expiry.
+
+- **Blob garbage collection.** `Store.PutRelease` deliberately leaves orphan
+  blobs on metadata failure (the comment is in `store.go`). Over time S3
+  bills grow. Add `shipd gc --dry-run` that lists blob keys with no
+  referencing release row and is older than N days; a `--delete` flag
+  actually removes them. Run it from cron.
+
+- **Basic observability.** No `/metrics`, no structured logs. A small
+  `expvar` or Prometheus endpoint exposing publish/download/yank counts,
+  blob-size histograms, and per-tool MCP call counts covers 80% of
+  ops blindness for ~50 LOC.
+
+### Beyond v1.0
+
+- **Telegram adapter.** Same shape as Slack/Feishu; deferred behind Slack
+  because the audience fit is weaker.
+- **GCS blob backend.** Native SDK, mirroring `S3BlobStore`. Open this when
+  someone actually asks for it.
+- **Optional CDN integration for downloads.** Sign and redirect to a
+  CloudFront / R2-public URL when configured, keeping origin behind shipd.
+- **Inbound media for the WeChat iLink adapter.** Image/voice/video/file
+  decode (CDN AES-128-ECB unwrap + media-upload flow). Significant work,
+  only worth doing if there's user demand.
+- **Streaming long-running publish.** Show progress as a reply update for
+  large artifacts.
+
+### Explicitly dropped from earlier roadmaps
+
+- **Crash clustering / stacktrace embedding.** Would require building a
+  whole `crashes` API + client SDKs + symbolication pipeline (dSYM/PDB
+  uploads, etc.) — a different product. shipd's job is distribution; crash
+  reporting is what Sentry / Crashlytics / Bugsnag do well already.
+- **Feishu webhook encrypted-payload support (AES-256-CBC unwrap).**
+  WebSocket mode shipped in v0.8 and is the default; it sidesteps any need
+  for incoming-payload crypto. Maintaining a Feishu-specific AES path for
+  the rarely-used webhook fallback is not worth the surface area.
+- **`gocloud.dev/blob` abstraction layer.** v0.9 already covers
+  S3 / R2 / MinIO / OSS via the native AWS SDK with `--s3-endpoint`. An
+  extra abstraction would mean another big dependency for marginal benefit;
+  if/when GCS support is needed, add it as a sibling to `S3BlobStore`
+  rather than refactoring everything onto gocloud.
 
 ## Non-goals
 
-- **Code signing.** This is platform-specific and tightly regulated; we link
-  out to platform tools rather than embed them.
-- **A full ticketing system.** Yank carries a reason; that's it. Use Linear/
-  Jira for incidents.
+- **Code signing.** Platform-specific and tightly regulated; we link out to
+  platform tools rather than embed them.
+- **Crash reporting / APM.** Stacktraces, symbolication, alerting,
+  aggregation — those are Sentry / Crashlytics / Bugsnag territory. shipd
+  carries release identity (sha256, version, channel) so those tools can
+  attribute crashes; it does not collect them.
+- **A full ticketing system.** Yank carries a reason; that's it. Use Linear
+  / Jira for incidents.
 - **Multi-tenancy.** A single shipd instance serves one team. Run more
   instances if you need stronger isolation.
 
