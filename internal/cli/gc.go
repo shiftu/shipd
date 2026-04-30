@@ -22,6 +22,7 @@ func newGCCmd() *cobra.Command {
 		dataDir   string
 		doDelete  bool
 		olderThan string
+		keepLast  int
 
 		blobBackend string
 		s3Bucket    string
@@ -38,6 +39,13 @@ With --delete, the corresponding metadata rows are removed and the backing
 blobs are deleted from the storage backend (FS or S3). Blobs shared with
 another release via content-addressed dedup are kept — only metadata is
 removed for those.
+
+The --keep-last N flag protects the N most-recently-published releases
+per (app, channel, platform) regardless of yank state, so a sequence of
+yanks on a slow-moving app can never reduce its storage to nothing —
+the most-recent artifact bytes survive so an operator who over-yanked
+can recover by un-yanking. Pass --keep-last 0 to disable this safety
+net for full cleanup.
 
 Run on the same host (and with the same --data-dir / --blob-backend args)
 as your shipd serve.`,
@@ -63,7 +71,10 @@ as your shipd serve.`,
 			}
 			defer st.Close()
 
-			cands, err := st.GCCandidates(ctx, ttl)
+			if keepLast < 0 {
+				return fmt.Errorf("--keep-last must be >= 0")
+			}
+			cands, err := st.GCCandidates(ctx, ttl, keepLast)
 			if err != nil {
 				return err
 			}
@@ -135,6 +146,7 @@ as your shipd serve.`,
 	cmd.Flags().StringVar(&dataDir, "data-dir", "./data", "shipd data directory")
 	cmd.Flags().BoolVar(&doDelete, "delete", false, "actually delete (default: dry-run)")
 	cmd.Flags().StringVar(&olderThan, "older-than", "30d", "minimum age since yank, e.g. 30d, 4w, 12h (use 0 for any age)")
+	cmd.Flags().IntVar(&keepLast, "keep-last", 1, "minimum recent releases to keep per (app, channel, platform), regardless of yank state (use 0 for full cleanup)")
 
 	cmd.Flags().StringVar(&blobBackend, "blob-backend", firstNonEmpty(os.Getenv("SHIPD_BLOB_BACKEND"), "fs"), "blob storage backend: fs | s3")
 	cmd.Flags().StringVar(&s3Bucket, "s3-bucket", os.Getenv("SHIPD_S3_BUCKET"), "S3 bucket name")

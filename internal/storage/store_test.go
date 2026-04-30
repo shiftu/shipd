@@ -365,7 +365,9 @@ func TestGCCandidatesFiltersByYankAge(t *testing.T) {
 		t.Fatalf("backdate: %v", err)
 	}
 
-	got30d, err := store.GCCandidates(ctx, 30*24*time.Hour)
+	// keepLast=0 disables the safety net so this test focuses purely on
+	// the age filter; keepLast behavior is exercised in TestGCCandidatesKeepLast.
+	got30d, err := store.GCCandidates(ctx, 30*24*time.Hour, 0)
 	if err != nil {
 		t.Fatalf("GCCandidates 30d: %v", err)
 	}
@@ -373,7 +375,7 @@ func TestGCCandidatesFiltersByYankAge(t *testing.T) {
 		t.Errorf("with 30d window expected only 1.0.0, got %v", versionList(got30d))
 	}
 
-	got0, err := store.GCCandidates(ctx, 0)
+	got0, err := store.GCCandidates(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("GCCandidates 0: %v", err)
 	}
@@ -405,7 +407,7 @@ func TestGCCandidatesIncludesPreMigrationYanks(t *testing.T) {
 		t.Fatalf("backdate: %v", err)
 	}
 
-	got, err := store.GCCandidates(ctx, 30*24*time.Hour)
+	got, err := store.GCCandidates(ctx, 30*24*time.Hour, 0)
 	if err != nil {
 		t.Fatalf("GCCandidates: %v", err)
 	}
@@ -426,12 +428,107 @@ func TestGCCandidatesIgnoresLiveReleases(t *testing.T) {
 	ctx := context.Background()
 
 	publishOne(t, store, "myapp", "1.0.0", "stable", "")
-	got, err := store.GCCandidates(ctx, 0)
+	got, err := store.GCCandidates(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("GCCandidates: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("expected no candidates among live releases, got %v", versionList(got))
+	}
+}
+
+// TestGCCandidatesKeepLast: even with all releases yanked-and-old, the N
+// most-recently-published per (app, channel, platform) must be protected.
+// This is the safety net for slow-moving apps where yanks accumulate over
+// time and would otherwise eat the entire history.
+func TestGCCandidatesKeepLast(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// Five iOS releases, all yanked. Backdate yanks to 60d so the age
+	// filter doesn't shadow the keepLast effect.
+	for _, v := range []string{"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"} {
+		publishOne(t, store, "myapp", v, "stable", "")
+		if err := store.YankRelease(ctx, "myapp", v, "stable", ""); err != nil {
+			t.Fatalf("yank %s: %v", v, err)
+		}
+	}
+	old := time.Now().Add(-60 * 24 * time.Hour).Unix()
+	if _, err := store.db.ExecContext(ctx, `UPDATE releases SET yanked_at = ?`, old); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	cases := []struct {
+		keepLast    int
+		wantCandLen int
+		// Versions that must NOT appear in the candidate list (i.e., kept).
+		// publishOne inserts in order, so 1.0.4 is the most-recent.
+		mustKeep []string
+	}{
+		{keepLast: 0, wantCandLen: 5, mustKeep: nil},
+		{keepLast: 1, wantCandLen: 4, mustKeep: []string{"1.0.4"}},
+		{keepLast: 2, wantCandLen: 3, mustKeep: []string{"1.0.3", "1.0.4"}},
+		{keepLast: 5, wantCandLen: 0, mustKeep: []string{"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"}},
+		{keepLast: 100, wantCandLen: 0, mustKeep: []string{"1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"}},
+	}
+	for _, c := range cases {
+		got, err := store.GCCandidates(ctx, 0, c.keepLast)
+		if err != nil {
+			t.Fatalf("GCCandidates keep=%d: %v", c.keepLast, err)
+		}
+		if len(got) != c.wantCandLen {
+			t.Errorf("keep=%d: got %d candidates %v, want %d", c.keepLast, len(got), versionList(got), c.wantCandLen)
+		}
+		seen := map[string]bool{}
+		for _, r := range got {
+			seen[r.Version] = true
+		}
+		for _, must := range c.mustKeep {
+			if seen[must] {
+				t.Errorf("keep=%d: protected version %s appeared as candidate", c.keepLast, must)
+			}
+		}
+	}
+}
+
+// TestGCCandidatesKeepLastPerPlatform: the partition includes platform, so
+// an iOS+Android app keeps one of each platform under --keep-last 1, not
+// "one of either platform whichever was newest overall".
+func TestGCCandidatesKeepLastPerPlatform(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	putReleaseForPlatform(t, store, "zendiac", "1.0.0", "stable", "ios")
+	putReleaseForPlatform(t, store, "zendiac", "1.0.1", "stable", "ios")
+	putReleaseForPlatform(t, store, "zendiac", "2.0.0", "stable", "android")
+	for _, v := range []string{"1.0.0", "1.0.1", "2.0.0"} {
+		if err := store.YankRelease(ctx, "zendiac", v, "stable", ""); err != nil {
+			t.Fatalf("yank %s: %v", v, err)
+		}
+	}
+	old := time.Now().Add(-60 * 24 * time.Hour).Unix()
+	if _, err := store.db.ExecContext(ctx, `UPDATE releases SET yanked_at = ?`, old); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	got, err := store.GCCandidates(ctx, 0, 1)
+	if err != nil {
+		t.Fatalf("GCCandidates: %v", err)
+	}
+	// Should keep 1.0.1 (newest iOS) and 2.0.0 (only Android). Only 1.0.0
+	// remains as a candidate.
+	if len(got) != 1 || got[0].Version != "1.0.0" {
+		t.Errorf("expected only [1.0.0] as candidate, got %v", versionList(got))
 	}
 }
 

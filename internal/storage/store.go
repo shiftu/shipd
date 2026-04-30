@@ -355,38 +355,83 @@ func (s *Store) YankRelease(ctx context.Context, app, version, channel, reason s
 }
 
 // GCCandidates returns yanked releases whose yank happened more than
-// olderThan ago — i.e., the rows whose blobs `shipd gc --delete` would
-// reclaim. olderThan == 0 means "any age (even just-yanked)". Releases
-// yanked before the yanked_at column was introduced have yanked_at = 0,
-// which sorts as "the dawn of time" and is therefore always eligible — the
-// operator wanting to GC ancient pre-migration yanks gets the right
-// behavior automatically.
+// olderThan ago AND that aren't among the keepLast most-recently-published
+// rows in their (app, channel, platform) group — i.e., the rows whose blobs
+// `shipd gc --delete` would reclaim.
 //
-// The returned slice is what the caller would pass to DeleteReleaseAndBlob;
-// dedup-safe deletion (skipping the blob when it's still referenced by a
-// non-candidate release) lives in DeleteReleaseAndBlob, not here.
-func (s *Store) GCCandidates(ctx context.Context, olderThan time.Duration) ([]Release, error) {
+//   - olderThan == 0: any age (even just-yanked) is eligible.
+//   - keepLast == 0: no per-group safety net; full cleanup.
+//   - keepLast > 0:  the N most recent rows per (app, channel, platform),
+//     regardless of yank state, are protected. This prevents a sequence of
+//     yanks from eventually emptying out an app's storage entirely — even
+//     for low-traffic apps where every release eventually accumulates a
+//     yank, the most-recent artifact bytes survive so an operator who
+//     accidentally over-yanked can recover by un-yanking that row.
+//
+// Releases yanked before the yanked_at column existed have yanked_at = 0,
+// which sorts as "the dawn of time" and is therefore always old-enough —
+// pre-migration yanks become eligible automatically once they fall out of
+// the keepLast window.
+//
+// Returned candidates are sorted by (yanked_at, app, version) for stable
+// dry-run output. Per-group ranking happens in Go because SQLite's window
+// functions are usable but make the query harder to read for the
+// release-history sizes shipd actually deals with (dozens, not millions).
+func (s *Store) GCCandidates(ctx context.Context, olderThan time.Duration, keepLast int) ([]Release, error) {
 	cutoff := time.Now().Add(-olderThan).Unix()
+
+	// One pass over all rows, ordered so each (app, channel, platform) group
+	// arrives newest-first. Walk the group, count rank, and only flag rows
+	// past keepLast that are also yanked-and-old.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
 		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
 		FROM releases
-		WHERE yanked = 1 AND yanked_at <= ?
-		ORDER BY yanked_at, app_name, version
-	`, cutoff)
+		ORDER BY app_name, channel, platform, created_at DESC, rowid DESC
+	`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Release
+
+	var (
+		out       []Release
+		lastGroup string
+		rank      int
+	)
 	for rows.Next() {
 		r, err := scanReleaseRow(rows)
 		if err != nil {
 			return nil, err
 		}
+		group := r.AppName + "\x00" + r.Channel + "\x00" + r.Platform
+		if group != lastGroup {
+			lastGroup = group
+			rank = 0
+		}
+		rank++
+		if rank <= keepLast {
+			continue
+		}
+		if !r.Yanked || r.YankedAt > cutoff {
+			continue
+		}
 		out = append(out, *r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].YankedAt != out[j].YankedAt {
+			return out[i].YankedAt < out[j].YankedAt
+		}
+		if out[i].AppName != out[j].AppName {
+			return out[i].AppName < out[j].AppName
+		}
+		return out[i].Version < out[j].Version
+	})
+	return out, nil
 }
 
 // DeleteReleaseAndBlob removes a release row and, if no other release rows
