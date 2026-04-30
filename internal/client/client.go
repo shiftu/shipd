@@ -228,6 +228,127 @@ func (c *Client) Promote(ctx context.Context, app, version, fromChannel, toChann
 	return decodeRelease(resp.Body)
 }
 
+// Unyank reverses a yank — used by `shipd unyank` and the
+// shipd_unyank_release MCP tool to recover a release whose blob was kept
+// alive by gc's --keep-last safety net.
+func (c *Client) Unyank(ctx context.Context, app, version, channel string) error {
+	q := url.Values{}
+	if channel != "" {
+		q.Set("channel", channel)
+	}
+	u := c.BaseURL + "/api/v1/apps/" + url.PathEscape(app) + "/releases/" + url.PathEscape(version) + "/unyank"
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// GCResult is the response shape from POST /api/v1/admin/gc. DryRun is
+// true when 'delete' was not requested; Candidates lists every row that
+// matched (or would have matched) the gc rules.
+type GCResult struct {
+	DryRun       bool          `json:"dry_run"`
+	Candidates   []GCCandidate `json:"candidates"`
+	RowsDeleted  int           `json:"rows_deleted"`
+	BlobsDeleted int           `json:"blobs_deleted"`
+	BlobsKept    int           `json:"blobs_kept_shared"`
+	ScannedBytes int64         `json:"scanned_bytes"`
+	Errors       int           `json:"errors"`
+}
+
+// GCCandidate is one row in GCResult.Candidates. Action is one of
+// "would-delete" / "deleted" / "row-deleted-blob-shared" / "error: ...".
+type GCCandidate struct {
+	AppName  string `json:"app"`
+	Version  string `json:"version"`
+	Channel  string `json:"channel"`
+	Platform string `json:"platform"`
+	Size     int64  `json:"size"`
+	SHA256   string `json:"sha256"`
+	YankedAt int64  `json:"yanked_at"`
+	Action   string `json:"action"`
+}
+
+// GC runs the same logic as `shipd gc` against a remote shipd. Requires
+// admin scope on the configured token. olderThan and keepLast accept the
+// same shapes as the CLI flags. doDelete=false is dry-run.
+func (c *Client) GC(ctx context.Context, olderThan string, keepLast int, doDelete bool) (*GCResult, error) {
+	q := url.Values{}
+	if olderThan != "" {
+		q.Set("older_than", olderThan)
+	}
+	q.Set("keep_last", fmt.Sprintf("%d", keepLast))
+	if doDelete {
+		q.Set("delete", "true")
+	}
+	u := c.BaseURL + "/api/v1/admin/gc?" + q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out GCResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// TokenCreated is the shape of the response from POST /api/v1/admin/tokens.
+// Plaintext is shown once and never recoverable — the caller is expected
+// to surface it to the operator immediately.
+type TokenCreated struct {
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	Plaintext string `json:"plaintext"`
+	ExpiresAt int64  `json:"expires_at,omitempty"`
+}
+
+// CreateToken mints a fresh token with the requested scope and TTL. ttl is
+// passed through to the server as-is (e.g. "90d", "12h", "" for never).
+// Requires admin scope on the configured token.
+func (c *Client) CreateToken(ctx context.Context, name, scope, ttl string) (*TokenCreated, error) {
+	if name == "" {
+		return nil, errors.New("name is required")
+	}
+	q := url.Values{}
+	q.Set("name", name)
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	if ttl != "" {
+		q.Set("ttl", ttl)
+	}
+	u := c.BaseURL + "/api/v1/admin/tokens?" + q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out TokenCreated
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) Yank(ctx context.Context, app, version, channel, reason string) error {
 	q := url.Values{}
 	if channel != "" {

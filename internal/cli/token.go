@@ -1,12 +1,8 @@
 package cli
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -24,13 +20,19 @@ func newTokenCmd() *cobra.Command {
 	}
 	cmd.PersistentFlags().StringVar(&dataDir, "data-dir", "./data", "shipd data directory")
 
-	var ttl string
+	var (
+		ttl   string
+		scope string
+	)
 	createCmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create a new token (printed once, store it now)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			d, err := parseTokenTTL(ttl)
+			if !storage.ValidScopes[scope] {
+				return fmt.Errorf("--scope must be r, rw, or admin (got %q)", scope)
+			}
+			d, err := storage.ParseTTL(ttl)
 			if err != nil {
 				return fmt.Errorf("--ttl: %w", err)
 			}
@@ -44,24 +46,47 @@ func newTokenCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			plaintext, err := generateToken()
+			plaintext, err := storage.GenerateTokenPlaintext()
 			if err != nil {
 				return err
 			}
-			if err := st.CreateToken(cmd.Context(), args[0], plaintext, "rw", expiresAt); err != nil {
+			if err := st.CreateToken(cmd.Context(), args[0], plaintext, scope, expiresAt); err != nil {
 				return err
 			}
 			// Token plaintext is the only thing on stdout so the
 			// `SHIPD_BOOTSTRAP_TOKEN=$(shipd token create ...)` pattern works.
-			// Expiry notice goes to stderr.
+			// Scope + expiry notice go to stderr.
+			fmt.Fprintf(cmd.ErrOrStderr(), "scope=%s", scope)
 			if expiresAt > 0 {
-				fmt.Fprintf(cmd.ErrOrStderr(), "expires at %s\n", formatTime(expiresAt))
+				fmt.Fprintf(cmd.ErrOrStderr(), " expires=%s", formatTime(expiresAt))
+			}
+			fmt.Fprintln(cmd.ErrOrStderr())
+
+			// Friendly warning: an operator bootstrapping a fresh data dir
+			// with the default scope ends up unable to call admin endpoints
+			// (gc, /api/v1/admin/tokens). Surface that proactively instead
+			// of letting them debug a 403 later.
+			if scope != "admin" {
+				if toks, err := st.ListTokens(cmd.Context()); err == nil {
+					hasAdmin := false
+					for _, t := range toks {
+						if t.Scope == "admin" {
+							hasAdmin = true
+							break
+						}
+					}
+					if !hasAdmin {
+						fmt.Fprintln(cmd.ErrOrStderr(),
+							"note: no admin-scope tokens exist — admin endpoints (gc, token creation via API) will be inaccessible. Re-run with --scope admin if needed.")
+					}
+				}
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", plaintext)
 			return nil
 		},
 	}
 	createCmd.Flags().StringVar(&ttl, "ttl", "", "token lifetime, e.g. 90d, 12h, 4w (default: never expires)")
+	createCmd.Flags().StringVar(&scope, "scope", "rw", "token scope: r (read-only) | rw (read+write, default) | admin (gc + token mgmt)")
 
 	cmd.AddCommand(
 		createCmd,
@@ -103,59 +128,6 @@ func newTokenCmd() *cobra.Command {
 		},
 	)
 	return cmd
-}
-
-func generateToken() (string, error) {
-	var buf [24]byte
-	if _, err := rand.Read(buf[:]); err != nil {
-		return "", err
-	}
-	return "shipd_" + base64.RawURLEncoding.EncodeToString(buf[:]), nil
-}
-
-// parseTokenTTL accepts standard Go duration strings (1h, 30m, 90s) plus the
-// security-friendly extensions "Nd" (days) and "Nw" (weeks). Empty input
-// returns 0, meaning "never expires".
-//
-// Days/weeks aren't part of time.ParseDuration because they're calendar-
-// approximate, but for token lifetimes that's fine — operators think in
-// "90 days", not "2160h".
-func parseTokenTTL(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, nil
-	}
-	if mul, ok := tokenTTLSuffix(s); ok {
-		n, err := strconv.Atoi(s[:len(s)-1])
-		if err != nil {
-			return 0, fmt.Errorf("invalid duration %q", s)
-		}
-		if n < 0 {
-			return 0, fmt.Errorf("ttl must be positive, got %q", s)
-		}
-		return time.Duration(n) * mul, nil
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return 0, err
-	}
-	if d < 0 {
-		return 0, fmt.Errorf("ttl must be positive, got %q", s)
-	}
-	return d, nil
-}
-
-func tokenTTLSuffix(s string) (time.Duration, bool) {
-	if len(s) < 2 {
-		return 0, false
-	}
-	switch s[len(s)-1] {
-	case 'd':
-		return 24 * time.Hour, true
-	case 'w':
-		return 7 * 24 * time.Hour, true
-	}
-	return 0, false
 }
 
 // formatExpiry renders the expires_at column for `shipd token list`. 0 means

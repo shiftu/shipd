@@ -21,9 +21,14 @@ func RegisterShipdTools(r *Registry, c *client.Client, baseURL string) {
 	r.Register(&listReleasesTool{c: c})
 	r.Register(&getReleaseTool{c: c})
 	r.Register(&yankReleaseTool{c: c})
+	r.Register(&unyankReleaseTool{c: c})
 	r.Register(&promoteReleaseTool{c: c})
 	r.Register(&publishTool{c: c})
 	r.Register(&downloadURLTool{c: c, baseURL: strings.TrimRight(baseURL, "/")})
+	// Admin tools: gc and token creation. They require an admin-scope token
+	// on the shipd server; the MCP host typically passes one explicitly.
+	r.Register(&gcTool{c: c})
+	r.Register(&createTokenTool{c: c})
 }
 
 // schema is a tiny helper to keep tool schema declarations readable.
@@ -178,6 +183,124 @@ func (t *yankReleaseTool) Call(ctx context.Context, raw json.RawMessage) (*CallT
 		return nil, err
 	}
 	return textResult(fmt.Sprintf("yanked %s@%s", args.App, args.Version)), nil
+}
+
+// --- unyank_release ---
+
+type unyankReleaseTool struct{ c *client.Client }
+
+func (t *unyankReleaseTool) Spec() ToolSpec {
+	return ToolSpec{
+		Name: "shipd_unyank_release",
+		Description: "Reverse a yank — bring a withdrawn release back to live status. " +
+			"Useful when a yanked release's bytes were preserved by gc's --keep-last safety net " +
+			"and the operator wants to re-enable installs without re-publishing. Idempotent: " +
+			"calling on a non-yanked release succeeds.",
+		InputSchema: schema(map[string]any{
+			"app":     strProp("App name."),
+			"version": strProp("Release version."),
+			"channel": strProp("Release channel (default: stable)."),
+		}, "app", "version"),
+	}
+}
+
+func (t *unyankReleaseTool) Call(ctx context.Context, raw json.RawMessage) (*CallToolResult, error) {
+	var args struct {
+		App     string `json:"app"`
+		Version string `json:"version"`
+		Channel string `json:"channel"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, err
+	}
+	if args.App == "" || args.Version == "" {
+		return textError("app and version are required"), nil
+	}
+	if err := t.c.Unyank(ctx, args.App, args.Version, args.Channel); err != nil {
+		return nil, err
+	}
+	return textResult(fmt.Sprintf("unyanked %s@%s", args.App, args.Version)), nil
+}
+
+// --- gc ---
+
+type gcTool struct{ c *client.Client }
+
+func (t *gcTool) Spec() ToolSpec {
+	return ToolSpec{
+		Name: "shipd_gc",
+		Description: "Reclaim storage from yanked releases. By default runs in dry-run mode and " +
+			"returns the candidates that WOULD be deleted; pass delete=true to actually remove " +
+			"the metadata rows and free the backing blobs. Requires an admin-scope token on the " +
+			"shipd server. The --keep-last safety net (default 1) protects the most-recent " +
+			"release per (app, channel, platform) regardless of yank state.",
+		InputSchema: schema(map[string]any{
+			"older_than": strProp("Minimum age since yank, e.g. 30d, 4w, 12h. '0' disables the age filter. Default: 30d."),
+			"keep_last":  map[string]any{"type": "integer", "description": "Releases per (app, channel, platform) to protect regardless of yank state. Default 1; pass 0 for full cleanup."},
+			"delete":     map[string]any{"type": "boolean", "description": "If true, actually delete. Default false (dry-run)."},
+		}),
+	}
+}
+
+func (t *gcTool) Call(ctx context.Context, raw json.RawMessage) (*CallToolResult, error) {
+	var args struct {
+		OlderThan string `json:"older_than"`
+		KeepLast  *int   `json:"keep_last"`
+		Delete    bool   `json:"delete"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, err
+	}
+	keep := 1
+	if args.KeepLast != nil {
+		if *args.KeepLast < 0 {
+			return textError("keep_last must be >= 0"), nil
+		}
+		keep = *args.KeepLast
+	}
+	res, err := t.c.GC(ctx, args.OlderThan, keep, args.Delete)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(res), nil
+}
+
+// --- create_token ---
+
+type createTokenTool struct{ c *client.Client }
+
+func (t *createTokenTool) Spec() ToolSpec {
+	return ToolSpec{
+		Name: "shipd_create_token",
+		Description: "Mint a new shipd auth token. Requires an admin-scope token on the shipd " +
+			"server. The plaintext value is returned in the result and is shown only once — " +
+			"surface it to the operator immediately and store it securely. Use this to provision " +
+			"scoped tokens for CI jobs (rw), sub-agents (r), or other admins (admin).",
+		InputSchema: schema(map[string]any{
+			"name":  strProp("Unique token name (visible to operators in `shipd token list`)."),
+			"scope": strProp("Token scope: r (read-only) | rw (read+write, default) | admin (gc + token mgmt)."),
+			"ttl":   strProp("Token lifetime, e.g. 90d, 12h, 4w. Empty/omitted = never expires."),
+		}, "name"),
+	}
+}
+
+func (t *createTokenTool) Call(ctx context.Context, raw json.RawMessage) (*CallToolResult, error) {
+	var args struct {
+		Name  string `json:"name"`
+		Scope string `json:"scope"`
+		TTL   string `json:"ttl"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, err
+	}
+	if args.Name == "" {
+		return textError("name is required"), nil
+	}
+	res, err := t.c.CreateToken(ctx, args.Name, args.Scope, args.TTL)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(res), nil
 }
 
 // --- promote_release ---

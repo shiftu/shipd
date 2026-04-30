@@ -50,7 +50,7 @@ net for full cleanup.
 Run on the same host (and with the same --data-dir / --blob-backend args)
 as your shipd serve.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ttl, err := parseTokenTTL(olderThan)
+			ttl, err := storage.ParseTTL(olderThan)
 			if err != nil {
 				return fmt.Errorf("--older-than: %w", err)
 			}

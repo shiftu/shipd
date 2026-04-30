@@ -637,6 +637,100 @@ func versionList(rels []Release) []string {
 	return out
 }
 
+// --- Unyank ---
+
+// TestUnyankReverses: yank a release, then unyank it. yanked / yanked_at /
+// yanked_reason all reset; subsequent LatestRelease picks it up again.
+func TestUnyankReverses(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "stable", "")
+	if err := store.YankRelease(ctx, "myapp", "1.0.0", "stable", "broken"); err != nil {
+		t.Fatalf("YankRelease: %v", err)
+	}
+	if err := store.UnyankRelease(ctx, "myapp", "1.0.0", "stable"); err != nil {
+		t.Fatalf("UnyankRelease: %v", err)
+	}
+	rel, err := store.GetRelease(ctx, "myapp", "1.0.0", "stable")
+	if err != nil {
+		t.Fatalf("GetRelease: %v", err)
+	}
+	if rel.Yanked || rel.YankedReason != "" || rel.YankedAt != 0 {
+		t.Errorf("expected fully reset, got yanked=%v reason=%q at=%d",
+			rel.Yanked, rel.YankedReason, rel.YankedAt)
+	}
+	// LatestRelease (which filters yanked) should now find it.
+	if _, err := store.LatestRelease(ctx, "myapp", "stable"); err != nil {
+		t.Errorf("LatestRelease should find unyanked release: %v", err)
+	}
+}
+
+// TestUnyankIdempotent: unyanking a not-currently-yanked release is fine.
+// The recovery path may be invoked by an automation that doesn't know the
+// current state.
+func TestUnyankIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "stable", "")
+	if err := store.UnyankRelease(ctx, "myapp", "1.0.0", "stable"); err != nil {
+		t.Errorf("unyank on non-yanked release should be idempotent, got %v", err)
+	}
+}
+
+// TestUnyankMissingReleaseReturnsErrNotFound: distinguishes "row exists but
+// wasn't yanked" (idempotent success) from "row doesn't exist" (404).
+func TestUnyankMissingReleaseReturnsErrNotFound(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	err = store.UnyankRelease(context.Background(), "ghost", "1.0.0", "stable")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// --- Token scope validation ---
+
+// TestCreateTokenRejectsInvalidScope: only r/rw/admin accepted; typos like
+// "write" fail loudly so a token can't sneak in with an unrecognized scope
+// that the auth middleware would treat as zero-rank (i.e., always denied).
+func TestCreateTokenRejectsInvalidScope(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	for _, bad := range []string{"write", "ADMIN", "rw ", "rwx", "owner"} {
+		if err := store.CreateToken(ctx, bad, "shipd_x_"+bad, bad, 0); err == nil {
+			t.Errorf("expected CreateToken to reject scope %q, got nil", bad)
+		}
+	}
+	for _, good := range []string{"r", "rw", "admin"} {
+		if err := store.CreateToken(ctx, "ok-"+good, "shipd_x_"+good, good, 0); err != nil {
+			t.Errorf("expected CreateToken to accept scope %q, got %v", good, err)
+		}
+	}
+}
+
 // --- LatestReleases ---
 
 // putReleaseForPlatform creates a release on a specific platform without the
@@ -754,6 +848,51 @@ func TestLatestReleasesEmptyApp(t *testing.T) {
 	}
 	if len(rels) != 0 {
 		t.Errorf("expected empty slice, got %d entries", len(rels))
+	}
+}
+
+// --- ParseTTL ---
+
+// TestParseTTL covers the duration shapes both shipd's CLI flags
+// (--ttl, --older-than) and the HTTP admin endpoints accept. The "d" /
+// "w" extensions matter most — Go's time.ParseDuration tops out at hours,
+// but token lifetimes and gc windows are normally measured in days.
+func TestParseTTL(t *testing.T) {
+	cases := []struct {
+		in   string
+		want time.Duration
+		err  bool
+	}{
+		{in: "", want: 0},
+		{in: "0", want: 0}, // Go's ParseDuration accepts bare "0"; same as empty.
+		{in: "30m", want: 30 * time.Minute},
+		{in: "1h", want: time.Hour},
+		{in: "2160h", want: 2160 * time.Hour},
+		{in: "1d", want: 24 * time.Hour},
+		{in: "90d", want: 90 * 24 * time.Hour},
+		{in: "1w", want: 7 * 24 * time.Hour},
+		{in: "4w", want: 4 * 7 * 24 * time.Hour},
+		{in: "  90d  ", want: 90 * 24 * time.Hour},
+		{in: "-1h", err: true},
+		{in: "-7d", err: true},
+		{in: "abc", err: true},
+		{in: "10x", err: true},
+	}
+	for _, c := range cases {
+		got, err := ParseTTL(c.in)
+		if c.err {
+			if err == nil {
+				t.Errorf("ParseTTL(%q) = %v, want error", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseTTL(%q) error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("ParseTTL(%q) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }
 

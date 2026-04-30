@@ -30,8 +30,9 @@ MVP scaffold. Working today:
 # build
 make build
 
-# create a data dir + bootstrap token
-SHIPD_BOOTSTRAP_TOKEN=$(./shipd token create bootstrap --data-dir ./data 2>/dev/null) \
+# create a data dir + bootstrap token (admin scope so it can manage other tokens
+# and run gc through the API; rw is fine for plain publish/yank workflows)
+SHIPD_BOOTSTRAP_TOKEN=$(./shipd token create bootstrap --scope admin --data-dir ./data 2>/dev/null) \
   ./shipd serve --data-dir ./data --addr :8080 &
 
 # point the CLI at it

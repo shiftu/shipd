@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,9 +88,10 @@ func (s *Server) bootstrapToken(ctx context.Context) error {
 	if len(tokens) > 0 {
 		return nil
 	}
-	// Bootstrap token never expires — losing it locks the operator out of
-	// their own server.
-	if err := s.store.CreateToken(ctx, "bootstrap", s.cfg.BootstrapToken, "rw", 0); err != nil {
+	// Bootstrap token never expires AND has admin scope — losing it locks
+	// the operator out of their own server, and they need admin to create
+	// further tokens of any scope via the API.
+	if err := s.store.CreateToken(ctx, "bootstrap", s.cfg.BootstrapToken, "admin", 0); err != nil {
 		return err
 	}
 	s.log.Printf("created bootstrap token 'bootstrap' (provided via SHIPD_BOOTSTRAP_TOKEN)")
@@ -109,7 +111,14 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases", s.requireWrite(s.handlePublish))
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/yank", s.requireWrite(s.handleYank))
+	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/unyank", s.requireWrite(s.handleUnyank))
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/promote", s.requireWrite(s.handlePromote))
+
+	// Admin endpoints: destructive (gc) or privilege-escalating (token
+	// creation). admin scope required on every call; the bootstrap token
+	// is the only one created with admin by default.
+	s.mux.HandleFunc("POST /api/v1/admin/gc", s.requireAdmin(s.handleGC))
+	s.mux.HandleFunc("POST /api/v1/admin/tokens", s.requireAdmin(s.handleCreateToken))
 
 	// The HTML install page is intentionally public — a phone scanning a QR
 	// code has no API token. The page mints fresh signed URLs at render time
@@ -337,10 +346,172 @@ func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, rel)
 }
 
+// handleUnyank reverses a yank — used to recover a release whose blob was
+// kept by gc's --keep-last safety net but whose row is still flagged yanked.
+// Idempotent: unyanking a non-yanked release is fine.
+func (s *Server) handleUnyank(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	version := r.PathValue("version")
+	channel := r.URL.Query().Get("channel")
+	if err := s.store.UnyankRelease(r.Context(), name, version, channel); err != nil {
+		writeStorageError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unyanked"})
+}
+
+// handleGC runs the same logic as `shipd gc`, exposed over HTTP so an agent
+// (via MCP or Slack) can run it. Scope is admin because it is destructive.
+//
+// Query params (all optional):
+//
+//	older_than=30d   minimum age since yank (default 30d, 0 disables)
+//	keep_last=1      protected per (app, channel, platform), default 1
+//	delete=true      actually delete (default: dry-run)
+func (s *Server) handleGC(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	olderThan := 30 * 24 * time.Hour
+	if v := q.Get("older_than"); v != "" {
+		d, err := storage.ParseTTL(v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("older_than: %w", err))
+			return
+		}
+		olderThan = d
+	}
+
+	keepLast := 1
+	if v := q.Get("keep_last"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("keep_last must be a non-negative integer"))
+			return
+		}
+		keepLast = n
+	}
+
+	doDelete := q.Get("delete") == "true" || q.Get("delete") == "1"
+
+	cands, err := s.store.GCCandidates(r.Context(), olderThan, keepLast)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	type cand struct {
+		AppName  string `json:"app"`
+		Version  string `json:"version"`
+		Channel  string `json:"channel"`
+		Platform string `json:"platform"`
+		Size     int64  `json:"size"`
+		SHA256   string `json:"sha256"`
+		YankedAt int64  `json:"yanked_at"`
+		Action   string `json:"action"`
+	}
+	type response struct {
+		DryRun       bool   `json:"dry_run"`
+		Candidates   []cand `json:"candidates"`
+		RowsDeleted  int    `json:"rows_deleted"`
+		BlobsDeleted int    `json:"blobs_deleted"`
+		BlobsKept    int    `json:"blobs_kept_shared"`
+		ScannedBytes int64  `json:"scanned_bytes"`
+		Errors       int    `json:"errors"`
+	}
+	resp := response{DryRun: !doDelete}
+	for _, c := range cands {
+		resp.ScannedBytes += c.Size
+		entry := cand{
+			AppName: c.AppName, Version: c.Version, Channel: c.Channel, Platform: c.Platform,
+			Size: c.Size, SHA256: c.SHA256, YankedAt: c.YankedAt, Action: "would-delete",
+		}
+		if doDelete {
+			blobGone, err := s.store.DeleteReleaseAndBlob(r.Context(), c.AppName, c.Version, c.Channel)
+			switch {
+			case err != nil:
+				entry.Action = "error: " + err.Error()
+				resp.Errors++
+			case blobGone:
+				entry.Action = "deleted"
+				resp.RowsDeleted++
+				resp.BlobsDeleted++
+			default:
+				entry.Action = "row-deleted-blob-shared"
+				resp.RowsDeleted++
+				resp.BlobsKept++
+			}
+		}
+		resp.Candidates = append(resp.Candidates, entry)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleCreateToken mints a fresh token of the requested scope. Plaintext is
+// returned in the response — shown once and never recoverable.
+//
+// Query params:
+//
+//	name=<unique>    required; conflict on duplicate
+//	scope=r|rw|admin defaults to rw
+//	ttl=30d|...      defaults to never-expires
+func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	name := q.Get("name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("name is required"))
+		return
+	}
+	scope := q.Get("scope")
+	if scope == "" {
+		scope = "rw"
+	}
+	if !storage.ValidScopes[scope] {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown scope %q (want r, rw, or admin)", scope))
+		return
+	}
+
+	var expiresAt int64
+	if ttl := q.Get("ttl"); ttl != "" {
+		d, err := storage.ParseTTL(ttl)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("ttl: %w", err))
+			return
+		}
+		if d > 0 {
+			expiresAt = time.Now().Add(d).Unix()
+		}
+	}
+
+	plaintext, err := storage.GenerateTokenPlaintext()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.store.CreateToken(r.Context(), name, plaintext, scope, expiresAt); err != nil {
+		if errors.Is(err, storage.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.log.Printf("admin: created token name=%q scope=%q expires_at=%d", name, scope, expiresAt)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"name":       name,
+		"scope":      scope,
+		"plaintext":  plaintext,
+		"expires_at": expiresAt,
+	})
+}
+
 // --- middleware ---
 
 func (s *Server) requireWrite(h http.HandlerFunc) http.HandlerFunc {
 	return s.requireToken(h, "rw")
+}
+
+func (s *Server) requireAdmin(h http.HandlerFunc) http.HandlerFunc {
+	return s.requireToken(h, "admin")
 }
 
 func (s *Server) requireRead(h http.HandlerFunc) http.HandlerFunc {
@@ -350,7 +521,18 @@ func (s *Server) requireRead(h http.HandlerFunc) http.HandlerFunc {
 	return s.requireToken(h, "")
 }
 
-// requireToken enforces auth. minScope of "rw" requires a writable token; empty means any valid token.
+// scopeRank orders the auth scopes so requireToken can do a single
+// comparison. admin > rw > r; an admin token implicitly grants rw and r,
+// an rw token implicitly grants r. Unknown scope strings rank below r so
+// they can't accidentally satisfy any check.
+var scopeRank = map[string]int{
+	"r":     1,
+	"rw":    2,
+	"admin": 3,
+}
+
+// requireToken enforces auth. minScope == "" means any valid token; "rw"
+// requires rw or admin; "admin" requires admin.
 func (s *Server) requireToken(h http.HandlerFunc, minScope string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		tok := extractToken(r)
@@ -370,8 +552,9 @@ func (s *Server) requireToken(h http.HandlerFunc, minScope string) http.HandlerF
 			writeError(w, http.StatusUnauthorized, fmt.Errorf("invalid token"))
 			return
 		}
-		if minScope == "rw" && t.Scope != "rw" {
-			writeError(w, http.StatusForbidden, fmt.Errorf("token lacks write scope"))
+		if minScope != "" && scopeRank[t.Scope] < scopeRank[minScope] {
+			writeError(w, http.StatusForbidden,
+				fmt.Errorf("token scope %q insufficient (need %q)", t.Scope, minScope))
 			return
 		}
 		h(w, r)
