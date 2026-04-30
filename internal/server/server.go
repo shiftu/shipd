@@ -87,7 +87,9 @@ func (s *Server) bootstrapToken(ctx context.Context) error {
 	if len(tokens) > 0 {
 		return nil
 	}
-	if err := s.store.CreateToken(ctx, "bootstrap", s.cfg.BootstrapToken, "rw"); err != nil {
+	// Bootstrap token never expires — losing it locks the operator out of
+	// their own server.
+	if err := s.store.CreateToken(ctx, "bootstrap", s.cfg.BootstrapToken, "rw", 0); err != nil {
 		return err
 	}
 	s.log.Printf("created bootstrap token 'bootstrap' (provided via SHIPD_BOOTSTRAP_TOKEN)")
@@ -358,6 +360,13 @@ func (s *Server) requireToken(h http.HandlerFunc, minScope string) http.HandlerF
 		}
 		t, err := s.store.LookupToken(r.Context(), tok)
 		if err != nil {
+			// "expired" leaks one bit (token name was once valid) but
+			// substantially helps a legitimate user understand why their
+			// previously-working token suddenly stopped — a worthwhile trade.
+			if errors.Is(err, storage.ErrExpired) {
+				writeError(w, http.StatusUnauthorized, fmt.Errorf("token expired"))
+				return
+			}
 			writeError(w, http.StatusUnauthorized, fmt.Errorf("invalid token"))
 			return
 		}

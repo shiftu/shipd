@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // readSpy wraps an io.Reader and records whether Read was ever called. The
@@ -304,5 +305,97 @@ func TestPromoteReleaseRefusesSameChannel(t *testing.T) {
 	_, err = store.PromoteRelease(ctx, "myapp", "1.0.0", "stable", "stable")
 	if err == nil {
 		t.Fatal("expected refusal of same-channel promotion")
+	}
+}
+
+// --- Token expiry ---
+
+// TestTokenNeverExpiresWithZeroExpiry guards the back-compat default: a
+// token created with expiresAt=0 must keep working forever.
+func TestTokenNeverExpiresWithZeroExpiry(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.CreateToken(ctx, "forever", "shipd_forever", "rw", 0); err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	tok, err := store.LookupToken(ctx, "shipd_forever")
+	if err != nil {
+		t.Fatalf("LookupToken: %v", err)
+	}
+	if tok.ExpiresAt != 0 {
+		t.Errorf("ExpiresAt = %d, want 0", tok.ExpiresAt)
+	}
+}
+
+// TestTokenWithFutureExpiryLooksUp: a token good for an hour is accepted now.
+func TestTokenWithFutureExpiryLooksUp(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	exp := time.Now().Add(time.Hour).Unix()
+	if err := store.CreateToken(ctx, "hourly", "shipd_hourly", "rw", exp); err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	tok, err := store.LookupToken(ctx, "shipd_hourly")
+	if err != nil {
+		t.Fatalf("LookupToken: %v", err)
+	}
+	if tok.ExpiresAt != exp {
+		t.Errorf("ExpiresAt = %d, want %d", tok.ExpiresAt, exp)
+	}
+}
+
+// TestTokenExpiredReturnsErrExpired is the security contract: an expired
+// token gets ErrExpired (which the HTTP layer maps to 401), and last_used_at
+// must NOT be refreshed by the failed lookup.
+func TestTokenExpiredReturnsErrExpired(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	pastExp := time.Now().Add(-time.Second).Unix()
+	if err := store.CreateToken(ctx, "stale", "shipd_stale", "rw", pastExp); err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	_, err = store.LookupToken(ctx, "shipd_stale")
+	if !errors.Is(err, ErrExpired) {
+		t.Fatalf("expected ErrExpired, got %v", err)
+	}
+
+	// The token still appears in ListTokens (so an operator can see and
+	// revoke it). last_used_at should be 0 — the failed lookup must not
+	// have updated it.
+	toks, err := store.ListTokens(ctx)
+	if err != nil {
+		t.Fatalf("ListTokens: %v", err)
+	}
+	var found *Token
+	for i := range toks {
+		if toks[i].Name == "stale" {
+			found = &toks[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expired token missing from ListTokens")
+	}
+	if found.LastUsedAt != 0 {
+		t.Errorf("LastUsedAt = %d, want 0 (expired lookup must not refresh it)", found.LastUsedAt)
 	}
 }
