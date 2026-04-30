@@ -310,6 +310,110 @@ func (s *Store) YankRelease(ctx context.Context, app, version, channel, reason s
 	return nil
 }
 
+// PromoteRelease creates a new release row on dstChannel that points at the
+// same blob as the existing source release. No bytes are copied — the
+// content-addressed blob is shared. Notes, bundle_id, display_name, platform,
+// filename, size, and sha256 carry over from the source. The new row starts
+// non-yanked even if the source was yanked-on-its-channel — but a yanked
+// source is refused outright since promoting a known-bad build is almost
+// always a mistake.
+//
+// If srcChannel is empty, the source must exist on exactly one channel; if
+// the version exists on multiple channels, the call returns an error and
+// asks the caller to pass an explicit srcChannel.
+//
+// Errors:
+//   - ErrNotFound      — no row for (app, version) (or (app, version, srcChannel) when given)
+//   - ErrAlreadyExists — (app, version, dstChannel) is already taken
+//   - other            — yanked source, same-channel promotion, ambiguous source
+func (s *Store) PromoteRelease(ctx context.Context, app, version, srcChannel, dstChannel string) (*Release, error) {
+	if dstChannel == "" {
+		return nil, errors.New("destination channel is required")
+	}
+
+	var src *Release
+	if srcChannel == "" {
+		rels, err := s.releasesForVersion(ctx, app, version)
+		if err != nil {
+			return nil, err
+		}
+		if len(rels) == 0 {
+			return nil, ErrNotFound
+		}
+		if len(rels) > 1 {
+			return nil, fmt.Errorf("version %s exists on multiple channels (%s); pass an explicit source channel",
+				version, channelList(rels))
+		}
+		src = &rels[0]
+	} else {
+		var err error
+		src, err = s.GetRelease(ctx, app, version, srcChannel)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if src.Channel == dstChannel {
+		return nil, fmt.Errorf("source and destination channel are the same (%s)", dstChannel)
+	}
+	if src.Yanked {
+		return nil, fmt.Errorf("source release %s@%s [%s] is yanked", app, version, src.Channel)
+	}
+
+	dst := *src
+	dst.Channel = dstChannel
+	dst.Yanked = false
+	dst.YankedReason = ""
+	dst.CreatedAt = time.Now().Unix()
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO releases(app_name, version, channel, platform, blob_key, size, sha256,
+		                    filename, notes, bundle_id, display_name, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, dst.AppName, dst.Version, dst.Channel, dst.Platform, dst.BlobKey, dst.Size, dst.SHA256,
+		dst.Filename, dst.Notes, dst.BundleID, dst.DisplayName, dst.CreatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrAlreadyExists
+		}
+		return nil, err
+	}
+	return &dst, nil
+}
+
+// releasesForVersion returns every channel-row for (app, version), used by
+// PromoteRelease's auto-detect path.
+func (s *Store) releasesForVersion(ctx context.Context, app, version string) ([]Release, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
+		       yanked, yanked_reason, bundle_id, display_name, created_at
+		FROM releases
+		WHERE app_name = ? AND version = ?
+		ORDER BY channel
+	`, app, version)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Release
+	for rows.Next() {
+		r, err := scanReleaseRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+func channelList(rels []Release) string {
+	names := make([]string, 0, len(rels))
+	for _, r := range rels {
+		names = append(names, r.Channel)
+	}
+	return strings.Join(names, ", ")
+}
+
 // OpenBlob returns a reader for the blob backing this release.
 func (s *Store) OpenBlob(r *Release) (io.ReadCloser, error) {
 	return s.blobs.Get(context.Background(), r.BlobKey)

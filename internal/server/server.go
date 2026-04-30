@@ -84,6 +84,7 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases", s.requireWrite(s.handlePublish))
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/yank", s.requireWrite(s.handleYank))
+	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/promote", s.requireWrite(s.handlePromote))
 
 	// Install pages and the assets they depend on are intentionally PUBLIC: the
 	// device opening the page (a phone scanning a QR code, an iOS device
@@ -249,6 +250,34 @@ func (s *Server) handleYank(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "yanked"})
+}
+
+// handlePromote copies a release onto another channel without re-uploading
+// the blob. The destination channel comes from ?to=...; the optional ?from=...
+// disambiguates when the version exists on multiple source channels.
+func (s *Server) handlePromote(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	version := r.PathValue("version")
+	to := r.URL.Query().Get("to")
+	from := r.URL.Query().Get("from")
+	if to == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("query param 'to' is required"))
+		return
+	}
+	rel, err := s.store.PromoteRelease(r.Context(), name, version, from, to)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			writeError(w, http.StatusNotFound, err)
+		case errors.Is(err, storage.ErrAlreadyExists):
+			writeError(w, http.StatusConflict, err)
+		default:
+			// Ambiguous-source / yanked-source / same-channel are all caller errors.
+			writeError(w, http.StatusBadRequest, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusCreated, rel)
 }
 
 // --- middleware ---

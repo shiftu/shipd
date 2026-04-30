@@ -21,6 +21,7 @@ func RegisterShipdTools(r *Registry, c *client.Client, baseURL string) {
 	r.Register(&listReleasesTool{c: c})
 	r.Register(&getReleaseTool{c: c})
 	r.Register(&yankReleaseTool{c: c})
+	r.Register(&promoteReleaseTool{c: c})
 	r.Register(&publishTool{c: c})
 	r.Register(&downloadURLTool{c: c, baseURL: strings.TrimRight(baseURL, "/")})
 }
@@ -177,6 +178,45 @@ func (t *yankReleaseTool) Call(ctx context.Context, raw json.RawMessage) (*CallT
 		return nil, err
 	}
 	return textResult(fmt.Sprintf("yanked %s@%s", args.App, args.Version)), nil
+}
+
+// --- promote_release ---
+
+type promoteReleaseTool struct{ c *client.Client }
+
+func (t *promoteReleaseTool) Spec() ToolSpec {
+	return ToolSpec{
+		Name: "shipd_promote_release",
+		Description: "Copy a release onto another channel (e.g. beta → stable) without re-uploading bytes. " +
+			"The destination row points at the same content-addressed blob as the source, so this is fast " +
+			"and cheap. If 'from_channel' is omitted, the version must exist on exactly one channel.",
+		InputSchema: schema(map[string]any{
+			"app":          strProp("App name."),
+			"version":      strProp("Release version to promote."),
+			"to_channel":   strProp("Destination channel (e.g. stable)."),
+			"from_channel": strProp("Source channel. Omit to auto-detect when the version is on exactly one channel."),
+		}, "app", "version", "to_channel"),
+	}
+}
+
+func (t *promoteReleaseTool) Call(ctx context.Context, raw json.RawMessage) (*CallToolResult, error) {
+	var args struct {
+		App         string `json:"app"`
+		Version     string `json:"version"`
+		ToChannel   string `json:"to_channel"`
+		FromChannel string `json:"from_channel"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, err
+	}
+	if args.App == "" || args.Version == "" || args.ToChannel == "" {
+		return textError("app, version, and to_channel are required"), nil
+	}
+	rel, err := t.c.Promote(ctx, args.App, args.Version, args.FromChannel, args.ToChannel)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(rel), nil
 }
 
 // --- publish ---

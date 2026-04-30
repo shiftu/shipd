@@ -24,6 +24,7 @@ var chatAliases = []struct {
 	{usage: "info <app>[@<version>]", desc: "Show release metadata (latest by default)."},
 	{usage: "url <app>[@<version>]", desc: "Print a direct download URL."},
 	{usage: "yank <app>@<version> [reason=\"...\"]", desc: "Withdraw a published release."},
+	{usage: "promote <app>@<version> to=<channel> [from=<channel>]", desc: "Copy a release onto another channel (e.g. beta → stable)."},
 	{usage: "ask <question...>", desc: "Free-form question; an LLM picks tools to answer (requires ANTHROPIC_API_KEY)."},
 }
 
@@ -92,6 +93,35 @@ func parseCommand(text string) (*command, error) {
 			args[k] = v
 		}
 		return &command{Verb: verb, Tool: "shipd_yank_release", Args: args}, nil
+
+	case "promote":
+		if len(rest) < 1 {
+			return nil, fmt.Errorf("promote requires <app@version>")
+		}
+		args := refToArgs(rest[0])
+		if _, ok := args["version"]; !ok {
+			return nil, fmt.Errorf("promote requires <app@version>")
+		}
+		// Translate to=/from= (chat-friendly) into the MCP tool's
+		// to_channel/from_channel arg names.
+		for _, kv := range rest[1:] {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				return nil, fmt.Errorf("expected key=value, got %q", kv)
+			}
+			switch k {
+			case "to":
+				args["to_channel"] = v
+			case "from":
+				args["from_channel"] = v
+			default:
+				return nil, fmt.Errorf("unknown key %q for promote (want to=/from=)", k)
+			}
+		}
+		if _, ok := args["to_channel"]; !ok {
+			return nil, fmt.Errorf("promote requires to=<channel>")
+		}
+		return &command{Verb: verb, Tool: "shipd_promote_release", Args: args}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown verb %q (try 'help')", verb)

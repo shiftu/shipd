@@ -119,3 +119,190 @@ func TestPutReleaseDifferentChannelStillAllowed(t *testing.T) {
 		t.Fatalf("stable PutRelease: %v", err)
 	}
 }
+
+// --- PromoteRelease ---
+
+// publishOne is a test helper that creates a release row with the given
+// channel and a small body. Returns the inserted release.
+func publishOne(t *testing.T, store *Store, app, version, channel, notes string) *Release {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.UpsertApp(ctx, app, "ios"); err != nil {
+		t.Fatalf("UpsertApp: %v", err)
+	}
+	rel, err := store.PutRelease(ctx, Release{
+		AppName: app, Version: version, Channel: channel, Platform: "ios",
+		Filename: app + "-" + version + ".ipa",
+		Notes:    notes,
+		BundleID: "com.example." + app,
+	}, strings.NewReader("payload-"+version+"-"+channel))
+	if err != nil {
+		t.Fatalf("PutRelease %s@%s [%s]: %v", app, version, channel, err)
+	}
+	return rel
+}
+
+// TestPromoteReleaseHappyPath exercises the staged-rollout flow: publish to
+// beta, then promote to stable. The destination must share the source's
+// blob_key (no re-upload), inherit notes/bundle_id, and start non-yanked.
+func TestPromoteReleaseHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	beta := publishOne(t, store, "myapp", "1.0.0", "beta", "first cut")
+
+	stable, err := store.PromoteRelease(ctx, "myapp", "1.0.0", "beta", "stable")
+	if err != nil {
+		t.Fatalf("PromoteRelease: %v", err)
+	}
+	if stable.BlobKey != beta.BlobKey {
+		t.Errorf("expected shared blob_key %q, got %q", beta.BlobKey, stable.BlobKey)
+	}
+	if stable.Channel != "stable" {
+		t.Errorf("dst.Channel = %q, want stable", stable.Channel)
+	}
+	if stable.Notes != "first cut" || stable.BundleID != "com.example.myapp" {
+		t.Errorf("metadata not carried over: notes=%q bundle_id=%q", stable.Notes, stable.BundleID)
+	}
+	if stable.Yanked {
+		t.Error("dst should start non-yanked")
+	}
+
+	// Both rows visible via ListReleases.
+	rels, err := store.ListReleases(ctx, "myapp")
+	if err != nil {
+		t.Fatalf("ListReleases: %v", err)
+	}
+	if len(rels) != 2 {
+		t.Fatalf("expected 2 releases (beta + stable), got %d", len(rels))
+	}
+}
+
+// TestPromoteReleaseAutoDetectsSingleChannel: when srcChannel is empty and
+// the version exists on exactly one channel, that channel is the source.
+func TestPromoteReleaseAutoDetectsSingleChannel(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "beta", "")
+	rel, err := store.PromoteRelease(ctx, "myapp", "1.0.0", "", "stable")
+	if err != nil {
+		t.Fatalf("PromoteRelease (auto-detect): %v", err)
+	}
+	if rel.Channel != "stable" {
+		t.Errorf("dst.Channel = %q, want stable", rel.Channel)
+	}
+}
+
+// TestPromoteReleaseAmbiguousWithoutFrom: with srcChannel empty and the
+// version on multiple channels, the call must refuse and ask for an
+// explicit source.
+func TestPromoteReleaseAmbiguousWithoutFrom(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "alpha", "")
+	publishOne(t, store, "myapp", "1.0.0", "beta", "")
+
+	_, err = store.PromoteRelease(ctx, "myapp", "1.0.0", "", "stable")
+	if err == nil {
+		t.Fatal("expected ambiguity error, got nil")
+	}
+	if !strings.Contains(err.Error(), "multiple channels") {
+		t.Errorf("expected error to mention multiple channels, got %v", err)
+	}
+}
+
+// TestPromoteReleaseSourceNotFound: nothing to promote.
+func TestPromoteReleaseSourceNotFound(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	_, err = store.PromoteRelease(ctx, "ghost", "1.0.0", "", "stable")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+// TestPromoteReleaseTargetAlreadyExists: promoting onto a channel that
+// already has the same version maps to ErrAlreadyExists, so HTTP returns 409.
+func TestPromoteReleaseTargetAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "beta", "")
+	publishOne(t, store, "myapp", "1.0.0", "stable", "")
+
+	_, err = store.PromoteRelease(ctx, "myapp", "1.0.0", "beta", "stable")
+	if !errors.Is(err, ErrAlreadyExists) {
+		t.Fatalf("expected ErrAlreadyExists, got %v", err)
+	}
+}
+
+// TestPromoteReleaseRefusesYankedSource: don't propagate a known-bad build.
+func TestPromoteReleaseRefusesYankedSource(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "beta", "")
+	if err := store.YankRelease(ctx, "myapp", "1.0.0", "beta", "broken"); err != nil {
+		t.Fatalf("YankRelease: %v", err)
+	}
+
+	_, err = store.PromoteRelease(ctx, "myapp", "1.0.0", "beta", "stable")
+	if err == nil {
+		t.Fatal("expected refusal of yanked source, got nil")
+	}
+	if !strings.Contains(err.Error(), "yanked") {
+		t.Errorf("expected error to mention yanked, got %v", err)
+	}
+}
+
+// TestPromoteReleaseRefusesSameChannel: src == dst is a no-op at best, more
+// likely a typo.
+func TestPromoteReleaseRefusesSameChannel(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	publishOne(t, store, "myapp", "1.0.0", "stable", "")
+
+	_, err = store.PromoteRelease(ctx, "myapp", "1.0.0", "stable", "stable")
+	if err == nil {
+		t.Fatal("expected refusal of same-channel promotion")
+	}
+}

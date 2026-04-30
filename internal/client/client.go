@@ -203,6 +203,31 @@ func (c *Client) Publish(ctx context.Context, opts PublishOpts, body io.Reader, 
 	return decodeRelease(resp.Body)
 }
 
+// Promote copies a release onto toChannel without re-uploading the blob.
+// fromChannel may be empty to auto-detect, in which case the version must
+// exist on exactly one channel.
+func (c *Client) Promote(ctx context.Context, app, version, fromChannel, toChannel string) (*storage.Release, error) {
+	if toChannel == "" {
+		return nil, errors.New("toChannel is required")
+	}
+	q := url.Values{}
+	q.Set("to", toChannel)
+	if fromChannel != "" {
+		q.Set("from", fromChannel)
+	}
+	u := c.BaseURL + "/api/v1/apps/" + url.PathEscape(app) + "/releases/" + url.PathEscape(version) + "/promote?" + q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return decodeRelease(resp.Body)
+}
+
 func (c *Client) Yank(ctx context.Context, app, version, channel, reason string) error {
 	q := url.Values{}
 	if channel != "" {
