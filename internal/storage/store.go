@@ -185,6 +185,31 @@ type Release struct {
 // PutRelease atomically writes the blob and metadata.
 // If a release with (app, version, channel) already exists, returns ErrAlreadyExists.
 func (s *Store) PutRelease(ctx context.Context, r Release, body io.Reader) (*Release, error) {
+	if r.Channel == "" {
+		r.Channel = "stable"
+	}
+	if r.Platform == "" {
+		r.Platform = "generic"
+	}
+
+	// Cheap pre-check before reading the body: if (app, version, channel) is
+	// already taken, refuse without uploading. A multi-GB blob upload — and on
+	// S3, a real PutObject bill — for a CI job that retries the same publish
+	// is otherwise wasted. The UNIQUE constraint on the INSERT below is still
+	// the source of truth for the race where two concurrent publishes both
+	// pass this check; this just covers the common case.
+	var exists int
+	switch err := s.db.QueryRowContext(ctx, `
+		SELECT 1 FROM releases WHERE app_name = ? AND version = ? AND channel = ?
+	`, r.AppName, r.Version, r.Channel).Scan(&exists); {
+	case err == nil:
+		return nil, ErrAlreadyExists
+	case errors.Is(err, sql.ErrNoRows):
+		// fall through
+	default:
+		return nil, fmt.Errorf("check existing release: %w", err)
+	}
+
 	blobKey, size, sum, err := s.blobs.Put(ctx, body)
 	if err != nil {
 		return nil, fmt.Errorf("write blob: %w", err)
@@ -194,13 +219,6 @@ func (s *Store) PutRelease(ctx context.Context, r Release, body io.Reader) (*Rel
 	r.SHA256 = sum
 	if r.CreatedAt == 0 {
 		r.CreatedAt = time.Now().Unix()
-	}
-	if r.Channel == "" {
-		r.Channel = "stable"
-	}
-
-	if r.Platform == "" {
-		r.Platform = "generic"
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO releases(app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
