@@ -114,6 +114,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/apps/{name}/releases/{version}", s.requireRead(s.handleGetRelease))
 	s.mux.HandleFunc("GET /api/v1/apps/{name}/releases/{version}/download", s.requireRead(s.handleDownload))
 	s.mux.HandleFunc("GET /api/v1/apps/{name}/latest", s.requireRead(s.handleLatest))
+	// /api/v1/stats is the JSON sibling of /metrics — same data, served at
+	// rw scope so chat bots and agents (which typically run on rw tokens)
+	// can answer "is shipd healthy?" without an admin token.
+	s.mux.HandleFunc("GET /api/v1/stats", s.requireWrite(s.handleStats))
 
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases", s.requireWrite(s.handlePublish))
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/yank", s.requireWrite(s.handleYank))
@@ -183,6 +187,25 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	s.metrics.writeProm(w, stats)
+}
+
+// handleStats serves the same data as /metrics but as JSON, intended for
+// programmatic consumers that aren't a Prometheus scraper — the
+// shipd_stats MCP tool and the `stats` chat verb call this. rw scope
+// rather than admin so a chat bot's normal rw token works.
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	storageStats, err := s.store.Stats(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	snap := s.metrics.snapshot()
+	snap.Apps = storageStats.Apps
+	snap.ReleasesLive = storageStats.ReleasesLive
+	snap.ReleasesYanked = storageStats.ReleasesYanked
+	snap.TokensActive = storageStats.Tokens
+	snap.BlobBytes = storageStats.BlobBytesUnique
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {

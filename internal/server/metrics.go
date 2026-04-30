@@ -8,6 +8,44 @@ import (
 	"github.com/shiftu/shipd/internal/storage"
 )
 
+// Stats is the JSON-friendly snapshot served by GET /api/v1/stats. It
+// flattens the gauge fields from storage.StorageStats together with the
+// process-lifetime counters held in `metrics`, which is what the
+// shipd_stats MCP tool and the `stats` chat verb both consume. Field names
+// are JSON-natural ("publish_ok" rather than the Prometheus
+// "shipd_publish_total{result=ok}") so a chat formatter or an agent can
+// pick fields directly without parsing label syntax.
+type Stats struct {
+	// Catalog gauges (sampled at request time from SQLite).
+	Apps           int64 `json:"apps"`
+	ReleasesLive   int64 `json:"releases_live"`
+	ReleasesYanked int64 `json:"releases_yanked"`
+	TokensActive   int64 `json:"tokens_active"`
+	BlobBytes      int64 `json:"blob_bytes"`
+
+	// Counters since process start. Useful for "is anything weird?"
+	// at-a-glance — operators on a chat bot can see e.g. an auth_invalid
+	// climb without setting up a Prometheus scraper.
+	PublishOK          int64 `json:"publish_ok"`
+	PublishConflict    int64 `json:"publish_conflict"`
+	PublishError       int64 `json:"publish_error"`
+	Yank               int64 `json:"yank"`
+	Unyank             int64 `json:"unyank"`
+	Promote            int64 `json:"promote"`
+	DownloadAPI        int64 `json:"download_api"`
+	DownloadInstall    int64 `json:"download_install"`
+	InstallPageRenders int64 `json:"install_page_renders"`
+	InstallSigFail     int64 `json:"install_sig_fail"`
+	GCDryRunRuns       int64 `json:"gc_dry_run_runs"`
+	GCDeleteRuns       int64 `json:"gc_delete_runs"`
+	GCRowsDeleted      int64 `json:"gc_rows_deleted"`
+	GCBlobsDeleted     int64 `json:"gc_blobs_deleted"`
+	TokensCreated      int64 `json:"tokens_created"`
+	AuthInvalid        int64 `json:"auth_invalid"`
+	AuthExpired        int64 `json:"auth_expired"`
+	AuthForbidden      int64 `json:"auth_forbidden"`
+}
+
 // metrics is shipd's tiny, dependency-free Prometheus instrumentation. We
 // hand-roll the exposition format rather than pulling client_golang because
 // the metric set is small and stable, and one of shipd's selling points is
@@ -101,6 +139,31 @@ func (m *metrics) writeProm(w io.Writer, stats storage.StorageStats) {
 	fmt.Fprintf(w, "shipd_releases{state=\"yanked\"} %d\n", stats.ReleasesYanked)
 	writeGauge(w, "shipd_tokens_active", "Tokens in the auth store (including expired rows).", stats.Tokens)
 	writeGauge(w, "shipd_blob_bytes", "Sum of blob sizes after content-addressed dedup (approximates disk usage).", stats.BlobBytesUnique)
+}
+
+// snapshot returns a Stats with the counter fields populated; the caller
+// fills in the gauge fields from storage.StorageStats.
+func (m *metrics) snapshot() Stats {
+	return Stats{
+		PublishOK:          m.publishOK.Load(),
+		PublishConflict:    m.publishConflict.Load(),
+		PublishError:       m.publishError.Load(),
+		Yank:               m.yankOK.Load(),
+		Unyank:             m.unyankOK.Load(),
+		Promote:            m.promoteOK.Load(),
+		DownloadAPI:        m.downloadAPI.Load(),
+		DownloadInstall:    m.downloadInstall.Load(),
+		InstallPageRenders: m.installPageRenders.Load(),
+		InstallSigFail:     m.installSigFail.Load(),
+		GCDryRunRuns:       m.gcRuns.Load(),
+		GCDeleteRuns:       m.gcDeleteRuns.Load(),
+		GCRowsDeleted:      m.gcRowsDeleted.Load(),
+		GCBlobsDeleted:     m.gcBlobsDeleted.Load(),
+		TokensCreated:      m.tokensCreated.Load(),
+		AuthInvalid:        m.authInvalid.Load(),
+		AuthExpired:        m.authExpired.Load(),
+		AuthForbidden:      m.authForbidden.Load(),
+	}
 }
 
 func writeCounter(w io.Writer, name, help string, v int64) {

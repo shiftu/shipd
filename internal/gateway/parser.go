@@ -25,6 +25,7 @@ var chatAliases = []struct {
 	{usage: "url <app>[@<version>]", desc: "Print a direct download URL."},
 	{usage: "yank <app>@<version> [reason=\"...\"]", desc: "Withdraw a published release."},
 	{usage: "promote <app>@<version> to=<channel> [from=<channel>]", desc: "Copy a release onto another channel (e.g. beta → stable)."},
+	{usage: "stats", desc: "Show shipd runtime stats — catalog size, disk usage, recent activity counters."},
 	{usage: "ask <question...>", desc: "Free-form question; an LLM picks tools to answer (requires ANTHROPIC_API_KEY)."},
 }
 
@@ -93,6 +94,9 @@ func parseCommand(text string) (*command, error) {
 			args[k] = v
 		}
 		return &command{Verb: verb, Tool: "shipd_yank_release", Args: args}, nil
+
+	case "stats":
+		return &command{Verb: verb, Tool: "shipd_stats", Args: map[string]any{}}, nil
 
 	case "promote":
 		if len(rest) < 1 {

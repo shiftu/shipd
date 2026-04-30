@@ -25,6 +25,7 @@ func RegisterShipdTools(r *Registry, c *client.Client, baseURL string) {
 	r.Register(&promoteReleaseTool{c: c})
 	r.Register(&publishTool{c: c})
 	r.Register(&downloadURLTool{c: c, baseURL: strings.TrimRight(baseURL, "/")})
+	r.Register(&statsTool{c: c})
 	// Admin tools: gc and token creation. They require an admin-scope token
 	// on the shipd server; the MCP host typically passes one explicitly.
 	r.Register(&gcTool{c: c})
@@ -220,6 +221,71 @@ func (t *unyankReleaseTool) Call(ctx context.Context, raw json.RawMessage) (*Cal
 		return nil, err
 	}
 	return textResult(fmt.Sprintf("unyanked %s@%s", args.App, args.Version)), nil
+}
+
+// --- stats ---
+
+type statsTool struct{ c *client.Client }
+
+func (t *statsTool) Spec() ToolSpec {
+	return ToolSpec{
+		Name: "shipd_stats",
+		Description: "Show shipd's runtime stats — catalog gauges (apps, releases, disk usage) " +
+			"plus operational counters since the server started (publishes, downloads, yanks, " +
+			"auth failures, gc runs). Useful for 'is shipd healthy?' or 'how active is this " +
+			"team's release flow?'. Requires rw scope; matches the JSON shape served at " +
+			"GET /api/v1/stats but rendered as compact text for direct chat display.",
+		InputSchema: schema(map[string]any{}),
+	}
+}
+
+func (t *statsTool) Call(ctx context.Context, _ json.RawMessage) (*CallToolResult, error) {
+	s, err := t.c.Stats(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return textResult(formatStats(s)), nil
+}
+
+// formatStats renders a Stats snapshot as a compact human-readable summary.
+// Both LLMs (via the MCP tool) and chat users (via the gateway) read the
+// same output — the format keeps the line-per-fact shape so an agent can
+// extract values without parsing prose.
+func formatStats(s *client.Stats) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "apps              %d\n", s.Apps)
+	fmt.Fprintf(&b, "releases          %d live, %d yanked\n", s.ReleasesLive, s.ReleasesYanked)
+	fmt.Fprintf(&b, "storage           %s (after dedup)\n", humanBytes(s.BlobBytes))
+	fmt.Fprintf(&b, "tokens            %d active\n", s.TokensActive)
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "since server start:")
+	fmt.Fprintf(&b, "  publish         ok=%d conflict=%d error=%d\n", s.PublishOK, s.PublishConflict, s.PublishError)
+	fmt.Fprintf(&b, "  yank/unyank     %d / %d\n", s.Yank, s.Unyank)
+	fmt.Fprintf(&b, "  promote         %d\n", s.Promote)
+	fmt.Fprintf(&b, "  download        api=%d install=%d\n", s.DownloadAPI, s.DownloadInstall)
+	fmt.Fprintf(&b, "  install_page    %d renders, %d sig failures\n", s.InstallPageRenders, s.InstallSigFail)
+	fmt.Fprintf(&b, "  gc              dry-run=%d delete=%d (rows=%d, blobs=%d)\n",
+		s.GCDryRunRuns, s.GCDeleteRuns, s.GCRowsDeleted, s.GCBlobsDeleted)
+	fmt.Fprintf(&b, "  tokens_created  %d\n", s.TokensCreated)
+	fmt.Fprintf(&b, "  auth_failure    invalid=%d expired=%d forbidden=%d\n",
+		s.AuthInvalid, s.AuthExpired, s.AuthForbidden)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// humanBytes renders a byte count as a small KiB/MiB/GiB string. Mirrors
+// internal/cli/util.go's humanSize but kept local so the mcp package
+// doesn't reach into cli.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), []string{"KiB", "MiB", "GiB", "TiB"}[exp])
 }
 
 // --- gc ---

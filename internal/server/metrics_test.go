@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -148,6 +149,90 @@ func TestMetricsRequiresAdminScope(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestStatsEndpointJSON: /api/v1/stats serves the JSON sibling of /metrics
+// at rw scope (lower than /metrics's admin) so a chat bot's normal rw
+// token works. Also confirms gauges are populated from storage and
+// counters from the in-memory metrics struct.
+func TestStatsEndpointJSON(t *testing.T) {
+	dir := t.TempDir()
+	store, err := storage.Open(dir, nil)
+	if err != nil {
+		t.Fatalf("storage.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := t.Context()
+	if err := store.CreateToken(ctx, "rw-tok", "shipd_test_rw", "rw", 0); err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	if err := store.CreateToken(ctx, "r-tok", "shipd_test_r", "r", 0); err != nil {
+		t.Fatalf("CreateToken r: %v", err)
+	}
+	publishOne := func(t *testing.T, app, version string) {
+		t.Helper()
+		if err := store.UpsertApp(ctx, app, "ios"); err != nil {
+			t.Fatalf("UpsertApp: %v", err)
+		}
+		if _, err := store.PutRelease(ctx, storage.Release{
+			AppName: app, Version: version, Channel: "stable", Platform: "ios",
+		}, strings.NewReader("body-"+app+"-"+version)); err != nil {
+			t.Fatalf("PutRelease: %v", err)
+		}
+	}
+	publishOne(t, "demo", "1.0.0")
+	publishOne(t, "demo", "1.0.1")
+
+	srv, err := New(Config{DataDir: dir}, store, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv.metrics.publishOK.Add(7)
+	srv.metrics.authInvalid.Add(3)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// r-scope token must be rejected (rw required for stats).
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	req.Header.Set("X-Auth-Token", "shipd_test_r")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do r-token: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("r token should be 403, got %d", resp.StatusCode)
+	}
+
+	// rw token gets the JSON.
+	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	req.Header.Set("X-Auth-Token", "shipd_test_rw")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do rw-token: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("rw token should be 200, got %d", resp.StatusCode)
+	}
+
+	var got Stats
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Apps != 1 {
+		t.Errorf("Apps = %d, want 1", got.Apps)
+	}
+	if got.ReleasesLive != 2 {
+		t.Errorf("ReleasesLive = %d, want 2", got.ReleasesLive)
+	}
+	if got.PublishOK != 7 {
+		t.Errorf("PublishOK = %d, want 7", got.PublishOK)
+	}
+	if got.AuthInvalid != 3 {
+		t.Errorf("AuthInvalid = %d, want 3", got.AuthInvalid)
 	}
 }
 

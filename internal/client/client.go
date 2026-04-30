@@ -59,6 +59,51 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// Stats is the shape returned by GET /api/v1/stats. Kept structurally
+// identical to the server-side type (server.Stats) so the JSON wire
+// format round-trips without translation; we duplicate the Go type to
+// avoid a server→client import.
+type Stats struct {
+	Apps           int64 `json:"apps"`
+	ReleasesLive   int64 `json:"releases_live"`
+	ReleasesYanked int64 `json:"releases_yanked"`
+	TokensActive   int64 `json:"tokens_active"`
+	BlobBytes      int64 `json:"blob_bytes"`
+
+	PublishOK          int64 `json:"publish_ok"`
+	PublishConflict    int64 `json:"publish_conflict"`
+	PublishError       int64 `json:"publish_error"`
+	Yank               int64 `json:"yank"`
+	Unyank             int64 `json:"unyank"`
+	Promote            int64 `json:"promote"`
+	DownloadAPI        int64 `json:"download_api"`
+	DownloadInstall    int64 `json:"download_install"`
+	InstallPageRenders int64 `json:"install_page_renders"`
+	InstallSigFail     int64 `json:"install_sig_fail"`
+	GCDryRunRuns       int64 `json:"gc_dry_run_runs"`
+	GCDeleteRuns       int64 `json:"gc_delete_runs"`
+	GCRowsDeleted      int64 `json:"gc_rows_deleted"`
+	GCBlobsDeleted     int64 `json:"gc_blobs_deleted"`
+	TokensCreated      int64 `json:"tokens_created"`
+	AuthInvalid        int64 `json:"auth_invalid"`
+	AuthExpired        int64 `json:"auth_expired"`
+	AuthForbidden      int64 `json:"auth_forbidden"`
+}
+
+// Stats fetches the current server snapshot.
+func (c *Client) Stats(ctx context.Context) (*Stats, error) {
+	resp, err := c.get(ctx, "/api/v1/stats", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var s Stats
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 // --- read ops ---
 
 func (c *Client) ListApps(ctx context.Context) ([]storage.App, error) {
