@@ -52,6 +52,21 @@
     min-width: 240px;
   }
   .install.disabled { background: var(--muted); pointer-events: none; opacity: .6; }
+  .alternates { margin-top: 18px; }
+  .alt-label { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+  .install-alt {
+    display: inline-block;
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--border);
+    padding: 8px 14px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none;
+    margin: 0 4px 6px 0;
+  }
+  .install-alt:hover { border-color: var(--accent); }
   .qr-wrap { margin-top: 32px; }
   .qr-wrap p { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
   .qr { width: 200px; height: 200px; image-rendering: pixelated; border-radius: 8px; }
@@ -85,6 +100,13 @@
   <a class="install" href="{{.InstallURL}}">{{.InstallLabel}}</a>
   {{else}}
   <span class="install disabled">{{.InstallLabel}}</span>
+  {{end}}
+
+  {{if .Alternates}}
+  <div class="alternates">
+    <p class="alt-label">Also available:</p>
+    {{range .Alternates}}<a class="install-alt" href="{{.InstallURL}}">{{.InstallLabel}} · {{.Version}}</a>{{end}}
+  </div>
   {{end}}
 
   {{if .QRCode}}

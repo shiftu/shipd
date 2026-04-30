@@ -308,6 +308,126 @@ func TestPromoteReleaseRefusesSameChannel(t *testing.T) {
 	}
 }
 
+// --- LatestReleases ---
+
+// putReleaseForPlatform creates a release on a specific platform without the
+// publishOne helper's defaults. Used by the multi-platform tests where the
+// platform value is the whole point.
+func putReleaseForPlatform(t *testing.T, store *Store, app, version, channel, platform string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.UpsertApp(ctx, app, platform); err != nil {
+		t.Fatalf("UpsertApp: %v", err)
+	}
+	if _, err := store.PutRelease(ctx, Release{
+		AppName: app, Version: version, Channel: channel, Platform: platform,
+		Filename: app + "-" + version + "." + platform,
+		BundleID: "com.example." + app,
+	}, strings.NewReader("payload-"+version+"-"+platform)); err != nil {
+		t.Fatalf("PutRelease %s@%s [%s]: %v", app, version, platform, err)
+	}
+}
+
+// TestLatestReleasesOnePerPlatform reproduces the install-page bug: an iOS
+// upload followed by an Android upload used to make /install/{app} show only
+// the Android one. LatestReleases must surface both.
+func TestLatestReleasesOnePerPlatform(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	putReleaseForPlatform(t, store, "zendiac", "1.0.0", "stable", "ios")
+	putReleaseForPlatform(t, store, "zendiac", "1.0.1", "stable", "android")
+
+	rels, err := store.LatestReleases(ctx, "zendiac", "")
+	if err != nil {
+		t.Fatalf("LatestReleases: %v", err)
+	}
+	if len(rels) != 2 {
+		t.Fatalf("expected 2 (one per platform), got %d", len(rels))
+	}
+	// Sorted alphabetically: android, ios.
+	if rels[0].Platform != "android" || rels[1].Platform != "ios" {
+		t.Errorf("got platforms [%s, %s], want [android, ios]", rels[0].Platform, rels[1].Platform)
+	}
+	if rels[0].Version != "1.0.1" || rels[1].Version != "1.0.0" {
+		t.Errorf("got versions [%s, %s], want [1.0.1, 1.0.0]", rels[0].Version, rels[1].Version)
+	}
+}
+
+// TestLatestReleasesPicksNewestPerPlatform: with multiple iOS releases over
+// time, LatestReleases must pick the newest, not the first/oldest.
+func TestLatestReleasesPicksNewestPerPlatform(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	putReleaseForPlatform(t, store, "myapp", "1.0.0", "stable", "ios")
+	putReleaseForPlatform(t, store, "myapp", "1.1.0", "stable", "ios")
+	putReleaseForPlatform(t, store, "myapp", "2.0.0", "stable", "ios")
+
+	rels, err := store.LatestReleases(ctx, "myapp", "")
+	if err != nil {
+		t.Fatalf("LatestReleases: %v", err)
+	}
+	if len(rels) != 1 || rels[0].Version != "2.0.0" {
+		t.Errorf("expected single newest iOS release 2.0.0, got %+v", rels)
+	}
+}
+
+// TestLatestReleasesIgnoresYanked: a yanked release on one platform must not
+// appear, but it shouldn't disqualify other non-yanked releases on the same
+// platform either.
+func TestLatestReleasesIgnoresYanked(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	putReleaseForPlatform(t, store, "myapp", "1.0.0", "stable", "ios")
+	putReleaseForPlatform(t, store, "myapp", "1.0.1", "stable", "ios")
+	if err := store.YankRelease(ctx, "myapp", "1.0.1", "stable", "broken"); err != nil {
+		t.Fatalf("YankRelease: %v", err)
+	}
+
+	rels, err := store.LatestReleases(ctx, "myapp", "")
+	if err != nil {
+		t.Fatalf("LatestReleases: %v", err)
+	}
+	if len(rels) != 1 || rels[0].Version != "1.0.0" {
+		t.Errorf("expected fall-back to non-yanked 1.0.0, got %+v", rels)
+	}
+}
+
+// TestLatestReleasesEmptyApp: nothing published → empty slice, no error.
+func TestLatestReleasesEmptyApp(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+
+	rels, err := store.LatestReleases(context.Background(), "ghost", "")
+	if err != nil {
+		t.Fatalf("LatestReleases: %v", err)
+	}
+	if len(rels) != 0 {
+		t.Errorf("expected empty slice, got %d entries", len(rels))
+	}
+}
+
 // --- Token expiry ---
 
 // TestTokenNeverExpiresWithZeroExpiry guards the back-compat default: a

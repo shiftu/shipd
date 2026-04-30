@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	stdtmpl "text/template"
 	"time"
 
@@ -40,7 +41,19 @@ type installPageData struct {
 	QRCode       string // base64-encoded PNG, empty if generation fails (page still renders)
 	Yanked       bool
 	YankedReason string
-	Expired      bool // true when the previous signed link expired and the page was re-entered via ?expired=1
+	Expired      bool             // true when the previous signed link expired and the page was re-entered via ?expired=1
+	Alternates   []alternateLink // other-platform releases when the app has multiple platforms on the latest channel
+}
+
+// alternateLink is a non-primary platform's install option, rendered as a
+// secondary button under the main one. Only populated on the unversioned
+// /install/{app} path — the explicit /install/{app}/{version} path shows
+// only that single release.
+type alternateLink struct {
+	Platform     string
+	Version      string
+	InstallURL   template.URL
+	InstallLabel string
 }
 
 // plistData is everything the manifest.plist template needs.
@@ -56,18 +69,50 @@ type plistData struct {
 // handleInstallPage renders an HTML page with a platform-appropriate install
 // button and a QR code that points back at the same page. It is intentionally
 // PUBLIC: a phone scanning the QR code has no API token.
+//
+// On the unversioned /install/{app} path it picks the primary release by
+// matching User-Agent against the app's available platforms (iPhone/iPad UAs
+// → ios, Android UAs → android). Other platforms appear as secondary
+// "Also available" buttons so the same URL serves every visitor's device.
 func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("name")
 	version := r.PathValue("version") // empty when caller hits /install/{name}
 
-	rel, err := s.lookupForInstall(r, app, version)
-	if err != nil {
-		writeStorageError(w, err)
-		return
+	var primary *storage.Release
+	var alternates []storage.Release
+	if version == "" {
+		latest, err := s.store.LatestReleases(r.Context(), app, "")
+		if err != nil {
+			writeStorageError(w, err)
+			return
+		}
+		if len(latest) == 0 {
+			writeError(w, http.StatusNotFound, fmt.Errorf("no releases for %q", app))
+			return
+		}
+		primary, alternates = pickPrimary(latest, r.Header.Get("User-Agent"))
+	} else {
+		rel, err := s.store.GetRelease(r.Context(), app, version, "")
+		if err != nil {
+			writeStorageError(w, err)
+			return
+		}
+		primary = rel
 	}
+	rel := primary
 
 	publicBase := s.publicBase(r)
-	pageURL := publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version)
+	// QR encodes the unversioned URL when we're on it, so a phone scanning
+	// from a desktop view re-enters the page with its own UA and gets the
+	// platform-appropriate primary — a desktop viewer might see Android
+	// primary + iOS alternate, while the iPhone scanning the QR sees iOS
+	// primary + Android alternate.
+	var pageURL string
+	if version == "" {
+		pageURL = publicBase + "/install/" + url.PathEscape(rel.AppName)
+	} else {
+		pageURL = publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version)
+	}
 
 	data := installPageData{
 		Title:        installTitle(rel),
@@ -87,6 +132,20 @@ func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
 	data.InstallLabel = installLabel
 	data.CanInstall = canInstall
 
+	for i := range alternates {
+		alt := &alternates[i]
+		altURL, altLabel, altCan := s.installLink(alt, publicBase)
+		if !altCan {
+			continue
+		}
+		data.Alternates = append(data.Alternates, alternateLink{
+			Platform:     alt.Platform,
+			Version:      alt.Version,
+			InstallURL:   template.URL(altURL),
+			InstallLabel: altLabel,
+		})
+	}
+
 	if png, err := qrcode.Encode(pageURL, qrcode.Medium, 320); err == nil {
 		data.QRCode = base64.StdEncoding.EncodeToString(png)
 	} else {
@@ -100,6 +159,43 @@ func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
 	if err := installTmpl.Execute(w, data); err != nil {
 		s.log.Printf("install template: %v", err)
 	}
+}
+
+// pickPrimary chooses which release should be the primary install button
+// based on the request's User-Agent. iOS UAs (iPhone/iPad/iPod) → ios;
+// Android UAs → android; everything else falls back to the first release
+// alphabetically by platform. The remaining releases are returned as
+// alternates in the same alphabetical order.
+func pickPrimary(rels []storage.Release, ua string) (*storage.Release, []storage.Release) {
+	if len(rels) == 0 {
+		return nil, nil
+	}
+	preferred := platformFromUserAgent(ua)
+	if preferred != "" {
+		for i, r := range rels {
+			if r.Platform == preferred {
+				primary := r
+				alts := append([]storage.Release{}, rels[:i]...)
+				alts = append(alts, rels[i+1:]...)
+				return &primary, alts
+			}
+		}
+	}
+	primary := rels[0]
+	return &primary, append([]storage.Release{}, rels[1:]...)
+}
+
+// platformFromUserAgent maps a UA string to a shipd platform value. Returns
+// "" when the UA matches neither iOS nor Android — desktop and other clients
+// use the alphabetical fallback in pickPrimary.
+func platformFromUserAgent(ua string) string {
+	switch {
+	case strings.Contains(ua, "iPhone"), strings.Contains(ua, "iPad"), strings.Contains(ua, "iPod"):
+		return "ios"
+	case strings.Contains(ua, "Android"):
+		return "android"
+	}
+	return ""
 }
 
 // handleManifestPlist returns the iOS install manifest. Public so the device
@@ -156,15 +252,6 @@ func (s *Server) handleInstallDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- helpers ---
-
-// lookupForInstall picks the right release. version "" means latest non-yanked
-// for the default channel.
-func (s *Server) lookupForInstall(r *http.Request, app, version string) (*storage.Release, error) {
-	if version == "" {
-		return s.store.LatestRelease(r.Context(), app, "")
-	}
-	return s.store.GetRelease(r.Context(), app, version, "")
-}
 
 // publicBase returns the scheme://host the user reached us by. Honors a
 // configured override (PublicBaseURL) and the X-Forwarded-Proto header set by

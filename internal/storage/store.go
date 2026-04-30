@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -254,6 +255,43 @@ func (s *Store) GetRelease(ctx context.Context, app, version, channel string) (*
 		WHERE app_name = ? AND version = ? AND channel = ?
 	`, app, version, channel)
 	return scanRelease(row)
+}
+
+// LatestReleases returns the latest non-yanked release per distinct platform
+// on the given channel, sorted alphabetically by platform.
+//
+// This is the multi-platform-friendly counterpart to LatestRelease. When an
+// app has builds for both iOS and Android (different versions on the same
+// channel), LatestRelease returns whichever was uploaded most recently —
+// which surprises operators who expect "/install/{app}" to surface every
+// platform. LatestReleases lets the install page render one button per
+// available platform.
+//
+// Implementation: walk ListReleases (already sorted by created_at DESC) and
+// keep the first hit per platform. The N here is one app's release history,
+// not millions of rows; sorting in Go is comfortable.
+func (s *Store) LatestReleases(ctx context.Context, app, channel string) ([]Release, error) {
+	if channel == "" {
+		channel = "stable"
+	}
+	all, err := s.ListReleases(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []Release
+	for _, r := range all {
+		if r.Channel != channel || r.Yanked {
+			continue
+		}
+		if seen[r.Platform] {
+			continue
+		}
+		seen[r.Platform] = true
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Platform < out[j].Platform })
+	return out, nil
 }
 
 // LatestRelease returns the most recently uploaded non-yanked release for the given app/channel.
