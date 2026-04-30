@@ -40,6 +40,7 @@ type installPageData struct {
 	QRCode       string // base64-encoded PNG, empty if generation fails (page still renders)
 	Yanked       bool
 	YankedReason string
+	Expired      bool // true when the previous signed link expired and the page was re-entered via ?expired=1
 }
 
 // plistData is everything the manifest.plist template needs.
@@ -79,8 +80,9 @@ func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
 		Notes:        rel.Notes,
 		Yanked:       rel.Yanked,
 		YankedReason: rel.YankedReason,
+		Expired:      r.URL.Query().Get("expired") == "1",
 	}
-	installURL, installLabel, canInstall := installLink(rel, publicBase)
+	installURL, installLabel, canInstall := s.installLink(rel, publicBase)
 	data.InstallURL = template.URL(installURL)
 	data.InstallLabel = installLabel
 	data.CanInstall = canInstall
@@ -92,6 +94,9 @@ func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// The page embeds freshly-minted signed URLs on every render; caching
+	// would serve stale (expired) URLs to later visitors.
+	w.Header().Set("Cache-Control", "no-store")
 	if err := installTmpl.Execute(w, data); err != nil {
 		s.log.Printf("install template: %v", err)
 	}
@@ -113,7 +118,7 @@ func (s *Server) handleManifestPlist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := plistData{
-		DownloadURL:   s.publicBase(r) + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/download",
+		DownloadURL:   s.signedDownloadURL(rel, s.publicBase(r)),
 		BundleID:      rel.BundleID,
 		BundleVersion: rel.Version,
 		Title:         installTitle(rel),
@@ -184,21 +189,38 @@ func (s *Server) publicBase(r *http.Request) string {
 
 // installLink returns the URL the install button points at, the label to put
 // on the button, and whether the install can actually proceed.
-func installLink(rel *storage.Release, publicBase string) (string, string, bool) {
+//
+// It's a method so the signer can be reached: when signing is enabled, the
+// download URL (and the plist URL embedded inside the itms-services link)
+// carries an HMAC signature that limits its lifetime.
+func (s *Server) installLink(rel *storage.Release, publicBase string) (string, string, bool) {
 	switch rel.Platform {
 	case "ios":
 		if rel.BundleID == "" {
 			return "#", "iOS install unavailable (no bundle_id)", false
 		}
-		plist := publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/manifest.plist"
-		return "itms-services://?action=download-manifest&url=" + url.QueryEscape(plist), "Install on iOS", true
+		plistPath := "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/manifest.plist"
+		plistURL := publicBase + plistPath
+		if s.signer != nil {
+			plistURL += "?" + s.signer.SignedQuery(plistPath)
+		}
+		return "itms-services://?action=download-manifest&url=" + url.QueryEscape(plistURL), "Install on iOS", true
 	case "android":
-		return publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/download",
-			"Install on Android", true
+		return s.signedDownloadURL(rel, publicBase), "Install on Android", true
 	default:
-		return publicBase + "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/download",
-			"Download", true
+		return s.signedDownloadURL(rel, publicBase), "Download", true
 	}
+}
+
+// signedDownloadURL builds the public install download URL for a release,
+// appending an HMAC signature query when signing is enabled.
+func (s *Server) signedDownloadURL(rel *storage.Release, publicBase string) string {
+	path := "/install/" + url.PathEscape(rel.AppName) + "/" + url.PathEscape(rel.Version) + "/download"
+	full := publicBase + path
+	if s.signer != nil {
+		full += "?" + s.signer.SignedQuery(path)
+	}
+	return full
 }
 
 func installTitle(rel *storage.Release) string {

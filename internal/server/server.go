@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/shiftu/shipd/internal/storage"
 )
@@ -17,23 +19,44 @@ type Config struct {
 	PublicReads    bool   // if true, list/info/download work without a token
 	BootstrapToken string // optional plaintext token; created on startup if no tokens exist
 	PublicBaseURL  string // override the auto-detected public URL used in install links and QR codes
+	DataDir        string // used to persist the install-URL signing secret when InstallURLSecret is empty
+
+	// InstallURLTTL controls signed install URLs. When > 0, links to
+	// /install/.../{download,manifest.plist} carry an HMAC signature that
+	// expires after this duration; expired links 303-redirect back to the
+	// install page (or 410 for plist) so the user can mint a fresh one with
+	// one click. When == 0, install routes are fully public — backwards-
+	// compat with shipd ≤ v0.9.
+	InstallURLTTL time.Duration
+	// InstallURLSecret is the HMAC key as hex (≥ 32 bytes). If empty, the
+	// secret is auto-generated on first start and persisted under DataDir.
+	InstallURLSecret string
 }
 
 // Server is a thin wrapper around http.Server holding shared state.
 type Server struct {
-	cfg   Config
-	store *storage.Store
-	mux   *http.ServeMux
-	log   *log.Logger
+	cfg    Config
+	store  *storage.Store
+	mux    *http.ServeMux
+	log    *log.Logger
+	signer *installSigner // nil when InstallURLTTL == 0
 }
 
-func New(cfg Config, store *storage.Store, logger *log.Logger) *Server {
+func New(cfg Config, store *storage.Store, logger *log.Logger) (*Server, error) {
 	if logger == nil {
 		logger = log.Default()
 	}
 	s := &Server{cfg: cfg, store: store, mux: http.NewServeMux(), log: logger}
+
+	if cfg.InstallURLTTL > 0 {
+		secret, err := loadOrGenInstallSecret(cfg.DataDir, cfg.InstallURLSecret)
+		if err != nil {
+			return nil, fmt.Errorf("install-url signer: %w", err)
+		}
+		s.signer = &installSigner{secret: secret, ttl: cfg.InstallURLTTL}
+	}
 	s.routes()
-	return s
+	return s, nil
 }
 
 func (s *Server) Handler() http.Handler { return logRequests(s.log, s.mux) }
@@ -86,14 +109,46 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/yank", s.requireWrite(s.handleYank))
 	s.mux.HandleFunc("POST /api/v1/apps/{name}/releases/{version}/promote", s.requireWrite(s.handlePromote))
 
-	// Install pages and the assets they depend on are intentionally PUBLIC: the
-	// device opening the page (a phone scanning a QR code, an iOS device
-	// fetching the plist) does not have an API token. If you need privacy,
-	// front shipd with a reverse proxy that enforces it.
+	// The HTML install page is intentionally public — a phone scanning a QR
+	// code has no API token. The page mints fresh signed URLs at render time
+	// for the routes below; with --install-url-ttl=0 those signatures are
+	// disabled and the routes are fully public, matching pre-signing behavior.
 	s.mux.HandleFunc("GET /install/{name}", s.handleInstallPage)
 	s.mux.HandleFunc("GET /install/{name}/{version}", s.handleInstallPage)
-	s.mux.HandleFunc("GET /install/{name}/{version}/manifest.plist", s.handleManifestPlist)
-	s.mux.HandleFunc("GET /install/{name}/{version}/download", s.handleInstallDownload)
+	s.mux.HandleFunc("GET /install/{name}/{version}/manifest.plist", s.verifyInstallSig(s.handleManifestPlist, false))
+	s.mux.HandleFunc("GET /install/{name}/{version}/download", s.verifyInstallSig(s.handleInstallDownload, true))
+}
+
+// verifyInstallSig wraps handlers under /install/.../{download,manifest.plist}.
+// When signing is enabled, missing/invalid/expired signatures are rejected.
+//
+// For the download path, redirectOnFail=true sends a 303 back to the install
+// page with ?expired=1 — browser users (Android, generic) get a one-click
+// recovery. For the plist path, iOS expects a plist body and won't render
+// HTML, so we return 410 Gone with a plain-text message; the user has to go
+// back and refresh the install page manually.
+func (s *Server) verifyInstallSig(h http.HandlerFunc, redirectOnFail bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.signer == nil {
+			h(w, r)
+			return
+		}
+		q := r.URL.Query()
+		if err := s.signer.Verify(r.URL.Path, q.Get("exp"), q.Get("sig")); err != nil {
+			s.log.Printf("install-url verify failed: path=%s err=%v", r.URL.Path, err)
+			if redirectOnFail {
+				page := "/install/" + url.PathEscape(r.PathValue("name")) +
+					"/" + url.PathEscape(r.PathValue("version")) + "?expired=1"
+				http.Redirect(w, r, page, http.StatusSeeOther)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusGone)
+			_, _ = w.Write([]byte("Install link expired. Please refresh the install page and try again.\n"))
+			return
+		}
+		h(w, r)
+	}
 }
 
 // --- handlers ---

@@ -60,7 +60,11 @@
   dt { color: var(--muted); }
   dd { margin: 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; word-break: break-all; max-width: 60%; text-align: right; }
   .yanked { background: #f5e0e0; color: #882020; padding: 8px 12px; border-radius: 8px; font-size: 13px; margin: 0 0 16px; }
-  @media (prefers-color-scheme: dark) { .yanked { background: #3a1f1f; color: #ffaaaa; } }
+  .expired { background: #fff4d6; color: #6b4a00; padding: 8px 12px; border-radius: 8px; font-size: 13px; margin: 0 0 16px; }
+  @media (prefers-color-scheme: dark) {
+    .yanked { background: #3a1f1f; color: #ffaaaa; }
+    .expired { background: #3a2f15; color: #ffd87a; }
+  }
   footer { margin-top: 28px; font-size: 11px; color: var(--muted); }
   footer a { color: inherit; }
 </style>
@@ -72,6 +76,9 @@
 
   {{if .Yanked}}
   <p class="yanked">⚠ This release has been withdrawn{{if .YankedReason}}: {{.YankedReason}}{{end}}.</p>
+  {{end}}
+  {{if .Expired}}
+  <p class="expired">⏱ The previous install link expired. Tap install below to get a fresh one.</p>
   {{end}}
 
   {{if .CanInstall}}

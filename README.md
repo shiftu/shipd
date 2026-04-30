@@ -87,8 +87,13 @@ For correct install URLs behind TLS termination, set `--public-base-url
 https://your-host` (or `$SHIPD_PUBLIC_BASE_URL`) on `shipd serve`. Without it,
 shipd auto-detects from `Host` and `X-Forwarded-Proto`.
 
-These routes are intentionally PUBLIC — a phone scanning a QR code has no
-token. Front shipd with a reverse proxy if you need to gate them.
+The HTML install page is public — a phone scanning a QR code has no token.
+The download and `manifest.plist` URLs embedded inside it carry an HMAC
+signature that expires after `--install-url-ttl` (default 30m), so a copy
+of those URLs forwarded into chat history goes cold within hours. An
+expired download URL 303-redirects back to the install page so the user
+can mint a fresh one with one click. Pass `--install-url-ttl=0` to fully
+disable signing if you have your own gating in front of shipd.
 
 ## Using shipd from an Agent (MCP)
 

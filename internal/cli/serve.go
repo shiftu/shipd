@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"time"
 
 	"github.com/shiftu/shipd/internal/server"
 	"github.com/shiftu/shipd/internal/storage"
@@ -24,6 +25,9 @@ func newServeCmd() *cobra.Command {
 		s3Endpoint  string
 		s3Prefix    string
 		s3PathStyle bool
+
+		installURLTTL    time.Duration
+		installURLSecret string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -47,12 +51,18 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			defer st.Close()
-			s := server.New(server.Config{
-				Addr:           addr,
-				PublicReads:    publicReads,
-				BootstrapToken: os.Getenv("SHIPD_BOOTSTRAP_TOKEN"),
-				PublicBaseURL:  publicBaseURL,
+			s, err := server.New(server.Config{
+				Addr:             addr,
+				PublicReads:      publicReads,
+				BootstrapToken:   os.Getenv("SHIPD_BOOTSTRAP_TOKEN"),
+				PublicBaseURL:    publicBaseURL,
+				DataDir:          dataDir,
+				InstallURLTTL:    installURLTTL,
+				InstallURLSecret: installURLSecret,
 			}, st, log.Default())
+			if err != nil {
+				return err
+			}
 			return s.ListenAndServe(ctx)
 		},
 	}
@@ -61,6 +71,10 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&publicReads, "public-reads", false, "allow unauthenticated read endpoints")
 	cmd.Flags().StringVar(&publicBaseURL, "public-base-url", os.Getenv("SHIPD_PUBLIC_BASE_URL"),
 		"public URL prefix for install pages and QR codes (default: derived from request)")
+	cmd.Flags().DurationVar(&installURLTTL, "install-url-ttl", installURLTTLDefault(),
+		"TTL for signed install URLs (download + plist). 0 disables signing — fully public install routes (pre-v0.10 behavior).")
+	cmd.Flags().StringVar(&installURLSecret, "install-url-secret", os.Getenv("SHIPD_INSTALL_URL_SECRET"),
+		"hex-encoded HMAC secret (≥ 32 bytes / 64 hex chars). If empty, auto-managed at <data-dir>/install_url_secret.")
 
 	cmd.Flags().StringVar(&blobBackend, "blob-backend", firstNonEmpty(os.Getenv("SHIPD_BLOB_BACKEND"), "fs"),
 		"blob storage backend: fs | s3")
@@ -70,6 +84,19 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&s3Prefix, "s3-prefix", firstNonEmpty(os.Getenv("SHIPD_S3_PREFIX"), "blobs/"), "S3 key prefix")
 	cmd.Flags().BoolVar(&s3PathStyle, "s3-path-style", os.Getenv("SHIPD_S3_PATH_STYLE") == "true", "use path-style S3 addressing (set true for MinIO/R2)")
 	return cmd
+}
+
+// installURLTTLDefault honors $SHIPD_INSTALL_URL_TTL and falls back to 30m.
+// 30 min is comfortably longer than any normal page-open → tap-install →
+// iOS-confirm → IPA-fetch flow, while still rotating fast enough that a link
+// leaked to chat history goes cold within hours.
+func installURLTTLDefault() time.Duration {
+	if env := os.Getenv("SHIPD_INSTALL_URL_TTL"); env != "" {
+		if d, err := time.ParseDuration(env); err == nil {
+			return d
+		}
+	}
+	return 30 * time.Minute
 }
 
 // buildBlobStore returns the configured backend. fs is the zero-config
