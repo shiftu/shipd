@@ -269,20 +269,17 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeStorageError(w, err)
 		return
 	}
-	body, err := s.store.OpenBlob(rel)
+	rs, err := s.store.OpenBlobSeekable(rel)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	defer body.Close()
+	defer rs.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", rel.Size))
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, rel.Filename))
 	w.Header().Set("X-Content-SHA256", rel.SHA256)
 	s.metrics.downloadAPI.Add(1)
-	if _, err := copyTo(w, body); err != nil {
-		s.log.Printf("download stream error: %v", err)
-	}
+	http.ServeContent(w, r, rel.Filename, time.Unix(rel.CreatedAt, 0), rs)
 }
 
 // publishMeta carries metadata fields sent alongside the upload via query params or headers.

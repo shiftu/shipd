@@ -124,6 +124,95 @@ func (s *S3BlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error
 	return out.Body, nil
 }
 
+// OpenSeekable returns a lazy seekable reader. Each chunk of Reads after a
+// Seek is satisfied by issuing a fresh GetObject with a Range: bytes=pos-
+// header — S3 itself handles partial transfers, so iOS's chunked install
+// fetches translate into one GetObject per resume point rather than one
+// big stream we'd have to buffer in memory.
+//
+// size is supplied by the caller (the catalog row already knows it) so we
+// avoid the HeadObject round-trip http.ServeContent would otherwise force
+// via its Seek(0, io.SeekEnd) probe.
+func (s *S3BlobStore) OpenSeekable(ctx context.Context, key string, size int64) (io.ReadSeekCloser, error) {
+	return &s3SeekReader{
+		ctx:    ctx,
+		client: s.client,
+		bucket: s.cfg.Bucket,
+		key:    s.objectKey(key),
+		size:   size,
+	}, nil
+}
+
+// s3SeekReader implements io.ReadSeekCloser against an S3 object by
+// re-opening GetObject with a Range header whenever a Seek invalidates the
+// current body stream. Reads inside a contiguous range stream straight from
+// the open body — only a Seek that moves the cursor away pays the round-trip.
+type s3SeekReader struct {
+	ctx    context.Context
+	client *s3.Client
+	bucket string
+	key    string
+	size   int64
+
+	pos  int64
+	body io.ReadCloser // nil until first Read; closed and re-opened on each non-trivial Seek
+}
+
+func (r *s3SeekReader) Read(p []byte) (int, error) {
+	if r.pos >= r.size {
+		return 0, io.EOF
+	}
+	if r.body == nil {
+		out, err := r.client.GetObject(r.ctx, &s3.GetObjectInput{
+			Bucket: aws.String(r.bucket),
+			Key:    aws.String(r.key),
+			Range:  aws.String(fmt.Sprintf("bytes=%d-", r.pos)),
+		})
+		if err != nil {
+			if isS3NotFound(err) {
+				return 0, ErrNotFound
+			}
+			return 0, fmt.Errorf("s3 get(range): %w", err)
+		}
+		r.body = out.Body
+	}
+	n, err := r.body.Read(p)
+	r.pos += int64(n)
+	return n, err
+}
+
+func (r *s3SeekReader) Seek(offset int64, whence int) (int64, error) {
+	var newPos int64
+	switch whence {
+	case io.SeekStart:
+		newPos = offset
+	case io.SeekCurrent:
+		newPos = r.pos + offset
+	case io.SeekEnd:
+		newPos = r.size + offset
+	default:
+		return 0, fmt.Errorf("s3SeekReader: invalid whence %d", whence)
+	}
+	if newPos < 0 {
+		return 0, fmt.Errorf("s3SeekReader: negative position %d", newPos)
+	}
+	if newPos != r.pos && r.body != nil {
+		_ = r.body.Close()
+		r.body = nil
+	}
+	r.pos = newPos
+	return newPos, nil
+}
+
+func (r *s3SeekReader) Close() error {
+	if r.body == nil {
+		return nil
+	}
+	err := r.body.Close()
+	r.body = nil
+	return err
+}
+
 // Delete removes the object at key. S3 returns 204 even when the object is
 // missing, so the call is idempotent — gc can re-run safely.
 func (s *S3BlobStore) Delete(ctx context.Context, key string) error {

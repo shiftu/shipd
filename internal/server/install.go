@@ -3,10 +3,9 @@ package server
 import (
 	"embed"
 	"encoding/base64"
-	"errors"
+	"encoding/xml"
 	"fmt"
 	"html/template"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -214,11 +213,16 @@ func (s *Server) handleManifestPlist(w http.ResponseWriter, r *http.Request) {
 			fmt.Errorf("release has no bundle_id; republish with --bundle-id"))
 		return
 	}
+	// The plist is XML and our manifest template is text/template (which does
+	// not auto-escape). Signed download URLs contain `&sig=...`, which is a
+	// reserved XML entity start — embedding raw `&` makes the plist invalid
+	// and iOS's strict parser silently drops it (no install modal, no error).
+	// Pre-escape every string field we inject.
 	data := plistData{
-		DownloadURL:   s.signedDownloadURL(rel, s.publicBase(r)),
-		BundleID:      rel.BundleID,
-		BundleVersion: rel.Version,
-		Title:         installTitle(rel),
+		DownloadURL:   xmlEscape(s.signedDownloadURL(rel, s.publicBase(r))),
+		BundleID:      xmlEscape(rel.BundleID),
+		BundleVersion: xmlEscape(plistBundleVersion(rel.Version)),
+		Title:         xmlEscape(installTitle(rel)),
 	}
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	if err := manifestTmpl.Execute(w, data); err != nil {
@@ -229,6 +233,10 @@ func (s *Server) handleManifestPlist(w http.ResponseWriter, r *http.Request) {
 // handleInstallDownload streams the artifact bytes. Same as handleDownload but
 // reachable without a token, since iOS itms-services and direct browser
 // installs come from devices that don't have the API token.
+//
+// Served via http.ServeContent so Range requests get 206 Partial Content;
+// iOS's appstored fetches the IPA in chunks and silently aborts the install
+// when the server ignores Range and returns the whole body with 200.
 func (s *Server) handleInstallDownload(w http.ResponseWriter, r *http.Request) {
 	app := r.PathValue("name")
 	version := r.PathValue("version")
@@ -237,20 +245,19 @@ func (s *Server) handleInstallDownload(w http.ResponseWriter, r *http.Request) {
 		writeStorageError(w, err)
 		return
 	}
-	body, err := s.store.OpenBlob(rel)
+	rs, err := s.store.OpenBlobSeekable(rel)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	defer body.Close()
+	defer rs.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", rel.Size))
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, rel.Filename))
 	w.Header().Set("X-Content-SHA256", rel.SHA256)
 	s.metrics.downloadInstall.Add(1)
-	if _, err := io.Copy(w, body); err != nil && !errors.Is(err, io.EOF) {
-		s.log.Printf("install download stream: %v", err)
-	}
+	// modtime drives ETag/If-Modified-Since; CreatedAt is stable per release
+	// so caches will revalidate cheaply.
+	http.ServeContent(w, r, rel.Filename, time.Unix(rel.CreatedAt, 0), rs)
 }
 
 // --- helpers ---
@@ -317,6 +324,31 @@ func installTitle(rel *storage.Release) string {
 		return rel.DisplayName
 	}
 	return rel.AppName
+}
+
+// xmlEscape escapes a string for safe embedding in an XML text node.
+// encoding/xml.EscapeText handles `&`, `<`, `>`, `'`, `"` and disallowed
+// control chars — the full set the plist parser rejects. EscapeText writes
+// to an io.Writer and can fail only when the writer fails; strings.Builder
+// never fails, so the error path is unreachable.
+func xmlEscape(s string) string {
+	var buf strings.Builder
+	_ = xml.EscapeText(&buf, []byte(s))
+	return buf.String()
+}
+
+// plistBundleVersion sanitizes rel.Version for the iOS OTA manifest's
+// bundle-version field. iOS's appstored compares this against the IPA's
+// CFBundleShortVersionString and rejects characters that CFBundleShortVersionString
+// disallows — notably `+`. Flutter publishes versions as `2.9.7+293` (semver
+// build metadata = CFBundleVersion), so we drop everything from `+` onward
+// so `2.9.7+293` → `2.9.7`, matching the IPA's actual short version.
+// Without this iOS silently aborts the install when the user taps Install.
+func plistBundleVersion(version string) string {
+	if i := strings.Index(version, "+"); i >= 0 {
+		return version[:i]
+	}
+	return version
 }
 
 func shortHash(h string) string {

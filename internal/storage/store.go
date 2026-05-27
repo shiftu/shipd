@@ -635,6 +635,13 @@ func (s *Store) OpenBlob(r *Release) (io.ReadCloser, error) {
 	return s.blobs.Get(context.Background(), r.BlobKey)
 }
 
+// OpenBlobSeekable returns a seekable reader for the blob backing this
+// release. Used by HTTP handlers that need http.ServeContent semantics
+// (Range requests, 206 Partial Content) — iOS OTA installs depend on it.
+func (s *Store) OpenBlobSeekable(r *Release) (io.ReadSeekCloser, error) {
+	return s.blobs.OpenSeekable(context.Background(), r.BlobKey, r.Size)
+}
+
 // StorageStats is the snapshot of catalog-wide counts and bytes that the
 // /metrics endpoint exposes as gauges. BlobBytesUnique counts each
 // content-addressed blob once even when multiple release rows reference it,

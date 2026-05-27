@@ -30,6 +30,15 @@ type BlobStore interface {
 	// close the reader.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 
+	// OpenSeekable returns a seekable reader over the bytes stored under key.
+	// Required by HTTP handlers that serve via http.ServeContent so iOS OTA
+	// installs (which issue Range requests) get 206 Partial Content instead
+	// of a full-body 200 — the symptom of a non-Range server is iOS silently
+	// dropping the install when the user taps the manifest link. size is the
+	// total byte length, needed by ServeContent to set Content-Range without
+	// a separate Stat round-trip.
+	OpenSeekable(ctx context.Context, key string, size int64) (io.ReadSeekCloser, error)
+
 	// Delete removes the bytes stored under key. Idempotent: deleting a
 	// missing key is not an error (S3 returns 204; the FS backend swallows
 	// os.IsNotExist). Used by `shipd gc` to reclaim storage from yanked
@@ -105,6 +114,12 @@ func (s *FSBlobStore) Put(_ context.Context, body io.Reader) (string, int64, str
 }
 
 func (s *FSBlobStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	return os.Open(s.path(key))
+}
+
+// OpenSeekable returns *os.File, which already implements ReadSeekCloser.
+// The size argument is ignored — the file system has authoritative length.
+func (s *FSBlobStore) OpenSeekable(_ context.Context, key string, _ int64) (io.ReadSeekCloser, error) {
 	return os.Open(s.path(key))
 }
 
