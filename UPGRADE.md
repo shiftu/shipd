@@ -165,6 +165,79 @@ without modification.
   so users see the agent thinking instead of staring at a frozen
   prompt for 10–30 seconds.
 
+## Deploying via launchd (macOS, single-host)
+
+The repo ships an opinionated `make install` for the common case: one shipd
+process per macOS host, fronted by a Cloudflare Tunnel, with data under
+`~/.config/shipd/`. This is what `shipd.jiangtao.lol` runs on. If you want
+something else (system-wide LaunchDaemon, Docker, systemd, S3 backend),
+skip this section and wire your own supervisor.
+
+**One-time setup**
+
+```bash
+make install            # builds, installs /opt/homebrew/bin/shipd,
+                        # writes ~/Library/LaunchAgents/lol.jiangtao.shipd.plist,
+                        # creates ~/.config/shipd/{data,logs}, and bootstraps
+                        # the LaunchAgent.
+```
+
+That's the whole thing. The plist points launchd at
+`/opt/homebrew/bin/shipd serve --data-dir ~/.config/shipd/data --addr :8080`
+with `--public-base-url https://shipd.jiangtao.lol`. KeepAlive triggers on
+crash (`SuccessfulExit=false`), so a panic gets you a fresh process within
+a second.
+
+If your tunnel hostname or port differ, override at install time and
+they get baked into the plist:
+
+```bash
+make install LISTEN_ADDR=:9090 PUBLIC_BASE=https://shipd.example.com
+```
+
+**Code upgrades**
+
+```bash
+make restart            # picks up a freshly-built binary at the existing
+                        # PREFIX. Use this for normal upgrades.
+
+make install            # use this when you change a flag, env var, or
+                        # plist field — rewrites the plist and reloads it.
+```
+
+`make restart` calls `launchctl kickstart -k`, which sends SIGTERM, waits
+for exit, then relaunches with the new binary on disk. The brief downtime
+is bounded by how long shipd takes to flush in-flight uploads.
+
+**Where things live**
+
+```
+/opt/homebrew/bin/shipd                            ← binary
+~/Library/LaunchAgents/lol.jiangtao.shipd.plist    ← service definition
+~/.config/shipd/data/                              ← SQLite + content-addressed blobs
+~/.config/shipd/data/install_url_secret            ← HMAC key (see signing section)
+~/.config/shipd/logs/shipd.log                     ← stdout
+~/.config/shipd/logs/shipd.error.log               ← stderr
+```
+
+`make logs` tails both log files. `make uninstall` removes the binary and
+the plist but never touches the data dir — the SQLite catalog and your
+uploaded IPAs are user data, not infrastructure.
+
+**Migrating from a bare-process deploy**
+
+If you've been running shipd as a backgrounded `./shipd serve --data-dir
+./data ...` out of the repo directory, switching to launchd is a one-time
+data move:
+
+```bash
+pkill -f 'shipd serve --data-dir ./data'   # stop the bare process
+mv /Users/panda/github/shipd/data ~/.config/shipd/data
+make install                               # launchd takes over
+```
+
+The blob layout is unchanged — just the parent directory moves.
+
 ## Rollback
 
 If you need to roll back from v1.0 to v0.9:
