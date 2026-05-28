@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shiftu/shipd/internal/pkginfo"
 	"github.com/shiftu/shipd/internal/storage"
 )
 
@@ -344,7 +346,56 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.metrics.publishOK.Add(1)
+	// Pull CFBundleIdentifier / CFBundleShortVersionString / CFBundleVersion
+	// out of the IPA so the OTA manifest can advertise values matching the
+	// actual binary (mismatch = silent install failure). Best-effort: if the
+	// extractor fails the publish still succeeds with empty fields and
+	// install.go falls back to deriving bundle-version from rel.Version.
+	if rel.Platform == "ios" {
+		s.enrichIPAInfo(r.Context(), rel)
+	}
 	writeJSON(w, http.StatusCreated, rel)
+}
+
+// enrichIPAInfo reads the just-stored IPA's Info.plist and updates the row.
+// Synchronous so the response carries the populated rel, but extraction is
+// tens of milliseconds for typical Info.plists (small file inside the zip).
+func (s *Server) enrichIPAInfo(ctx context.Context, rel *storage.Release) {
+	rs, err := s.store.OpenBlobSeekable(rel)
+	if err != nil {
+		s.log.Printf("ipa enrich: open blob %s@%s: %v", rel.AppName, rel.Version, err)
+		return
+	}
+	defer rs.Close()
+	info, err := pkginfo.ExtractIPAInfo(seekReaderAt{rs}, rel.Size)
+	if err != nil {
+		s.log.Printf("ipa enrich: extract %s@%s: %v", rel.AppName, rel.Version, err)
+		return
+	}
+	if err := s.store.UpdateBundleInfo(ctx, rel.AppName, rel.Version, rel.Channel,
+		info.BundleID, info.ShortVersion, info.BuildVersion); err != nil {
+		s.log.Printf("ipa enrich: update %s@%s: %v", rel.AppName, rel.Version, err)
+		return
+	}
+	// Reflect into the response shape so the publish API surfaces the values
+	// without an extra read.
+	if rel.BundleID == "" {
+		rel.BundleID = info.BundleID
+	}
+	rel.BundleShortVersion = info.ShortVersion
+	rel.BundleBuild = info.BuildVersion
+}
+
+// seekReaderAt adapts an io.ReadSeeker into io.ReaderAt for archive/zip,
+// which needs random access. Not goroutine-safe — fine for the single-shot
+// extraction call in enrichIPAInfo.
+type seekReaderAt struct{ rs io.ReadSeeker }
+
+func (s seekReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if _, err := s.rs.Seek(off, io.SeekStart); err != nil {
+		return 0, err
+	}
+	return io.ReadFull(s.rs, p)
 }
 
 func (s *Server) handleYank(w http.ResponseWriter, r *http.Request) {

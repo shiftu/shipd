@@ -116,6 +116,11 @@ func migrate(db *sql.DB) error {
 		`ALTER TABLE releases ADD COLUMN platform     TEXT NOT NULL DEFAULT 'generic'`,
 		`ALTER TABLE releases ADD COLUMN yanked_at    INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE tokens   ADD COLUMN expires_at   INTEGER NOT NULL DEFAULT 0`,
+		// v1.0.1: IPA Info.plist fields populated at publish time so the OTA
+		// manifest's bundle-version matches the IPA's real CFBundleShortVersionString.
+		// Empty for pre-1.0.1 rows and any non-IPA platform.
+		`ALTER TABLE releases ADD COLUMN bundle_short_version TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE releases ADD COLUMN bundle_build         TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil && !strings.Contains(err.Error(), "duplicate column") {
@@ -189,7 +194,14 @@ type Release struct {
 	YankedAt     int64  `json:"yanked_at,omitempty"`
 	BundleID     string `json:"bundle_id,omitempty"`
 	DisplayName  string `json:"display_name,omitempty"`
-	CreatedAt    int64  `json:"created_at"`
+	// BundleShortVersion / BundleBuild are populated at publish time for IPA
+	// uploads by reading the embedded Info.plist. BundleShortVersion is what
+	// the iOS OTA manifest's bundle-version must match (CFBundleShortVersionString);
+	// BundleBuild is the build number (CFBundleVersion) shown in the install UI.
+	// Empty when the platform isn't iOS or the extractor couldn't read the IPA.
+	BundleShortVersion string `json:"bundle_short_version,omitempty"`
+	BundleBuild        string `json:"bundle_build,omitempty"`
+	CreatedAt          int64  `json:"created_at"`
 }
 
 // PutRelease atomically writes the blob and metadata.
@@ -232,10 +244,10 @@ func (s *Store) PutRelease(ctx context.Context, r Release, body io.Reader) (*Rel
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO releases(app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		                    bundle_id, display_name, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                    bundle_id, display_name, bundle_short_version, bundle_build, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, r.AppName, r.Version, r.Channel, r.Platform, r.BlobKey, r.Size, r.SHA256, r.Filename, r.Notes,
-		r.BundleID, r.DisplayName, r.CreatedAt)
+		r.BundleID, r.DisplayName, r.BundleShortVersion, r.BundleBuild, r.CreatedAt)
 	if err != nil {
 		// Content-addressed blobs are safe to leave behind on a metadata
 		// failure: a future PutRelease with the same content will collapse
@@ -256,7 +268,7 @@ func (s *Store) GetRelease(ctx context.Context, app, version, channel string) (*
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, bundle_short_version, bundle_build, created_at
 		FROM releases
 		WHERE app_name = ? AND version = ? AND channel = ?
 	`, app, version, channel)
@@ -307,7 +319,7 @@ func (s *Store) LatestRelease(ctx context.Context, app, channel string) (*Releas
 	}
 	row := s.db.QueryRowContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, bundle_short_version, bundle_build, created_at
 		FROM releases
 		WHERE app_name = ? AND channel = ? AND yanked = 0
 		ORDER BY created_at DESC, rowid DESC
@@ -319,7 +331,7 @@ func (s *Store) LatestRelease(ctx context.Context, app, channel string) (*Releas
 func (s *Store) ListReleases(ctx context.Context, app string) ([]Release, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, bundle_short_version, bundle_build, created_at
 		FROM releases
 		WHERE app_name = ?
 		ORDER BY created_at DESC, rowid DESC
@@ -388,7 +400,7 @@ func (s *Store) GCCandidates(ctx context.Context, olderThan time.Duration, keepL
 	// past keepLast that are also yanked-and-old.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, bundle_short_version, bundle_build, created_at
 		FROM releases
 		ORDER BY app_name, channel, platform, created_at DESC, rowid DESC
 	`)
@@ -584,10 +596,10 @@ func (s *Store) PromoteRelease(ctx context.Context, app, version, srcChannel, ds
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO releases(app_name, version, channel, platform, blob_key, size, sha256,
-		                    filename, notes, bundle_id, display_name, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                    filename, notes, bundle_id, display_name, bundle_short_version, bundle_build, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, dst.AppName, dst.Version, dst.Channel, dst.Platform, dst.BlobKey, dst.Size, dst.SHA256,
-		dst.Filename, dst.Notes, dst.BundleID, dst.DisplayName, dst.CreatedAt)
+		dst.Filename, dst.Notes, dst.BundleID, dst.DisplayName, dst.BundleShortVersion, dst.BundleBuild, dst.CreatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrAlreadyExists
@@ -602,7 +614,7 @@ func (s *Store) PromoteRelease(ctx context.Context, app, version, srcChannel, ds
 func (s *Store) releasesForVersion(ctx context.Context, app, version string) ([]Release, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT app_name, version, channel, platform, blob_key, size, sha256, filename, notes,
-		       yanked, yanked_reason, yanked_at, bundle_id, display_name, created_at
+		       yanked, yanked_reason, yanked_at, bundle_id, display_name, bundle_short_version, bundle_build, created_at
 		FROM releases
 		WHERE app_name = ? AND version = ?
 		ORDER BY channel
@@ -640,6 +652,24 @@ func (s *Store) OpenBlob(r *Release) (io.ReadCloser, error) {
 // (Range requests, 206 Partial Content) — iOS OTA installs depend on it.
 func (s *Store) OpenBlobSeekable(r *Release) (io.ReadSeekCloser, error) {
 	return s.blobs.OpenSeekable(context.Background(), r.BlobKey, r.Size)
+}
+
+// UpdateBundleInfo patches the IPA-derived bundle fields on an existing
+// release row. Called by the publish handler after the blob lands, so the
+// extraction round-trip doesn't block the upload response on slow disks.
+// Idempotent: re-running with the same values is a no-op SET.
+func (s *Store) UpdateBundleInfo(ctx context.Context, app, version, channel, bundleID, shortVersion, build string) error {
+	if channel == "" {
+		channel = "stable"
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE releases
+		   SET bundle_id            = CASE WHEN ? = '' THEN bundle_id            ELSE ? END,
+		       bundle_short_version = ?,
+		       bundle_build         = ?
+		 WHERE app_name = ? AND version = ? AND channel = ?
+	`, bundleID, bundleID, shortVersion, build, app, version, channel)
+	return err
 }
 
 // StorageStats is the snapshot of catalog-wide counts and bytes that the
@@ -858,7 +888,7 @@ func scanRelease(s scanner) (*Release, error) {
 	var yanked int
 	if err := s.Scan(&r.AppName, &r.Version, &r.Channel, &r.Platform, &r.BlobKey, &r.Size, &r.SHA256,
 		&r.Filename, &r.Notes, &yanked, &r.YankedReason, &r.YankedAt,
-		&r.BundleID, &r.DisplayName, &r.CreatedAt); err != nil {
+		&r.BundleID, &r.DisplayName, &r.BundleShortVersion, &r.BundleBuild, &r.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

@@ -87,7 +87,7 @@
 <body>
 <main>
   <h1>{{.Title}}</h1>
-  <p class="version">{{.Version}}{{if ne .Channel "stable"}} · {{.Channel}}{{end}} · {{.Platform}}</p>
+  <p class="version">{{.Version}}{{if .BuildNumber}} (build {{.BuildNumber}}){{end}}{{if ne .Channel "stable"}} · {{.Channel}}{{end}} · {{.Platform}}</p>
 
   {{if .Yanked}}
   <p class="yanked">⚠ This release has been withdrawn{{if .YankedReason}}: {{.YankedReason}}{{end}}.</p>

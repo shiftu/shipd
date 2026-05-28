@@ -28,6 +28,7 @@ var (
 type installPageData struct {
 	Title        string
 	Version      string
+	BuildNumber  string // CFBundleVersion for iOS, empty when not extracted. Rendered as "build N" next to Version.
 	Channel      string
 	Platform     string
 	SizeHuman    string
@@ -116,6 +117,7 @@ func (s *Server) handleInstallPage(w http.ResponseWriter, r *http.Request) {
 	data := installPageData{
 		Title:        installTitle(rel),
 		Version:      rel.Version,
+		BuildNumber:  rel.BundleBuild,
 		Channel:      rel.Channel,
 		Platform:     rel.Platform,
 		SizeHuman:    humanSize(rel.Size),
@@ -218,10 +220,19 @@ func (s *Server) handleManifestPlist(w http.ResponseWriter, r *http.Request) {
 	// reserved XML entity start — embedding raw `&` makes the plist invalid
 	// and iOS's strict parser silently drops it (no install modal, no error).
 	// Pre-escape every string field we inject.
+	//
+	// bundle-version must match the IPA's CFBundleShortVersionString. Prefer
+	// the value we extracted at publish time; for pre-extraction rows fall
+	// back to stripping semver build metadata from rel.Version (handles the
+	// Flutter `2.9.7+293` convention).
+	bundleVersion := rel.BundleShortVersion
+	if bundleVersion == "" {
+		bundleVersion = plistBundleVersion(rel.Version)
+	}
 	data := plistData{
 		DownloadURL:   xmlEscape(s.signedDownloadURL(rel, s.publicBase(r))),
 		BundleID:      xmlEscape(rel.BundleID),
-		BundleVersion: xmlEscape(plistBundleVersion(rel.Version)),
+		BundleVersion: xmlEscape(bundleVersion),
 		Title:         xmlEscape(installTitle(rel)),
 	}
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
